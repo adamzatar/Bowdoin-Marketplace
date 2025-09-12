@@ -1,0 +1,171 @@
+# infra/helm/charts/postgres/templates/pvc.yaml
+#
+# Optional PersistentVolumeClaims for PostgreSQL.
+# NOTE: If your StatefulSet uses `volumeClaimTemplates`, you typically DO NOT need this file.
+# This template is useful when:
+#   - running a single-replica Postgres with a Deployment (not recommended for HA), or
+#   - you want to provision PVCs ahead of time and bind them via `existingClaim`, or
+#   - you run a custom controller that expects named PVCs.
+#
+# Controlled by:
+#   .Values.persistence.enabled (bool)
+#   .Values.persistence.standalonePVC (bool)   # only render when true
+#   .Values.persistence.name
+#   .Values.persistence.size
+#   .Values.persistence.accessModes
+#   .Values.persistence.storageClass
+#   .Values.persistence.annotations
+#   .Values.persistence.labels
+#   .Values.persistence.selector                # map[string]string
+#   .Values.persistence.dataSource              # { name, kind, apiGroup }
+#   .Values.persistence.volumeName              # bind to pre-provisioned PV by name
+#
+#   .Values.wal.enabled (bool)                  # optional separate WAL PVC
+#   .Values.wal.name
+#   .Values.wal.size
+#   .Values.wal.accessModes
+#   .Values.wal.storageClass
+#   .Values.wal.annotations
+#   .Values.wal.labels
+#   .Values.wal.selector                        # map[string]string
+#   .Values.wal.dataSource                      # { name, kind, apiGroup }
+#   .Values.wal.volumeName
+#
+# If you already have PVCs, set:
+#   .Values.persistence.existingClaim
+#   .Values.wal.existingClaim
+#
+# Security/Operational notes:
+# - Prefer dynamic provisioning through a CSI storage class with snapshots enabled.
+# - Consider using volume snapshots for backup/restore flows; see `dataSource`.
+# - For multi-AZ clusters, use topology-aware storage classes.
+# - For strict affinity to nodes with faster disks, use PV nodeAffinity on the PV.
+
+{{- $ns := default .Release.Namespace .Values.namespaceOverride -}}
+{{- $name := ternary .Values.fullnameOverride (printf "%s-postgres" .Release.Name) (and (hasKey .Values "fullnameOverride") (ne .Values.fullnameOverride "")) -}}
+{{- $baseLabels := dict
+      "app.kubernetes.io/name" "postgres"
+      "app.kubernetes.io/instance" .Release.Name
+      "app.kubernetes.io/component" "database"
+      "app.kubernetes.io/managed-by" "Helm"
+      "app.kubernetes.io/part-of" "bowdoin-marketplace"
+-}}
+
+{{/* ----------------------------
+     Data PVC (optional render)
+     ---------------------------- */}}
+{{- if and .Values.persistence.enabled .Values.persistence.standalonePVC }}
+{{- if not .Values.persistence.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ default (printf "%s-data" $name) .Values.persistence.name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- range $k, $v := $baseLabels }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+    {{- with .Values.persistence.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- if or .Values.persistence.annotations .Values.globalAnnotations }}
+  annotations:
+    {{- with .Values.globalAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.persistence.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- range (default (list "ReadWriteOnce") .Values.persistence.accessModes) }}
+    - {{ . | quote }}
+    {{- end }}
+  resources:
+    requests:
+      storage: {{ required "persistence.size is required for data PVC" .Values.persistence.size | quote }}
+  {{- if hasKey .Values.persistence "storageClass" }}
+  storageClassName: {{ if .Values.persistence.storageClass }}{{ .Values.persistence.storageClass | quote }}{{ else }}""{{ end }}
+  {{- end }}
+  {{- if .Values.persistence.selector }}
+  selector:
+    matchLabels:
+      {{- toYaml .Values.persistence.selector | nindent 6 }}
+  {{- end }}
+  {{- if or .Values.persistence.dataSource .Values.persistence.volumeName }}
+  {{- if .Values.persistence.dataSource }}
+  dataSource:
+    name: {{ required "persistence.dataSource.name required when specifying dataSource" .Values.persistence.dataSource.name | quote }}
+    kind: {{ required "persistence.dataSource.kind required when specifying dataSource" .Values.persistence.dataSource.kind | quote }}
+    {{- if .Values.persistence.dataSource.apiGroup }}
+    apiGroup: {{ .Values.persistence.dataSource.apiGroup | quote }}
+    {{- end }}
+  {{- end }}
+  {{- if .Values.persistence.volumeName }}
+  volumeName: {{ .Values.persistence.volumeName | quote }}
+  {{- end }}
+  {{- end }}
+---
+{{- end }}
+{{- end }}
+
+{{/* ------------------------------------
+     WAL PVC (optional, separate spindle)
+     ------------------------------------ */}}
+{{- if and .Values.persistence.enabled .Values.persistence.standalonePVC .Values.wal.enabled }}
+{{- if not .Values.wal.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ default (printf "%s-wal" $name) .Values.wal.name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- range $k, $v := $baseLabels }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+    tier: "wal"
+    {{- with .Values.wal.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- if or .Values.wal.annotations .Values.globalAnnotations }}
+  annotations:
+    {{- with .Values.globalAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.wal.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- range (default (list "ReadWriteOnce") .Values.wal.accessModes) }}
+    - {{ . | quote }}
+    {{- end }}
+  resources:
+    requests:
+      storage: {{ required "wal.size is required when wal.enabled=true" .Values.wal.size | quote }}
+  {{- if hasKey .Values.wal "storageClass" }}
+  storageClassName: {{ if .Values.wal.storageClass }}{{ .Values.wal.storageClass | quote }}{{ else }}""{{ end }}
+  {{- end }}
+  {{- if .Values.wal.selector }}
+  selector:
+    matchLabels:
+      {{- toYaml .Values.wal.selector | nindent 6 }}
+  {{- end }}
+  {{- if or .Values.wal.dataSource .Values.wal.volumeName }}
+  {{- if .Values.wal.dataSource }}
+  dataSource:
+    name: {{ required "wal.dataSource.name required when specifying WAL dataSource" .Values.wal.dataSource.name | quote }}
+    kind: {{ required "wal.dataSource.kind required when specifying WAL dataSource" .Values.wal.dataSource.kind | quote }}
+    {{- if .Values.wal.dataSource.apiGroup }}
+    apiGroup: {{ .Values.wal.dataSource.apiGroup | quote }}
+    {{- end }}
+  {{- end }}
+  {{- if .Values.wal.volumeName }}
+  volumeName: {{ .Values.wal.volumeName | quote }}
+  {{- end }}
+  {{- end }}
+---
+{{- end }}
+{{- end }}

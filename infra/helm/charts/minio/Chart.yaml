@@ -1,0 +1,54 @@
+# infra/helm/charts/minio/Chart.yaml
+apiVersion: v2
+name: minio
+type: application
+description: >
+  Hardened, production-grade MinIO (S3-compatible object storage) for the
+  Bowdoin Marketplace stack. Includes secure defaults, TLS, health probes,
+  metrics scraping, and persistence options.
+
+# Bump this on chart changes. CI/CD can pin/override appVersion to the container tag in use.
+version: 0.1.0
+appVersion: "2024.09.0"
+
+kubeVersion: ">=1.25.0-0"
+
+keywords:
+  - object-storage
+  - s3
+  - minio
+  - storage
+  - bowdoin
+
+home: https://min.io
+sources:
+  - https://github.com/minio/minio
+  - https://github.com/your-org/bowdoin-marketplace
+
+maintainers:
+  - name: Platform Team
+    email: platform@example.com
+
+annotations:
+  category: storage
+  artifacthub.io/links: |
+    - name: MinIO Docs
+      url: https://min.io/docs/minio/kubernetes/upstream/
+    - name: Upstream Image
+      url: https://hub.docker.com/r/minio/minio
+  artifacthub.io/changes: |
+    - kind: added
+      description: Initial hardened MinIO chart with TLS, persistence, and metrics hooks.
+    - kind: changed
+      description: Align securityContext and PodSecurityAdmission restricted profile defaults.
+  artifacthub.io/license: Apache-2.0
+  # Images used by this chart (for SBOMs / audits)
+  artifacthub.io/images: |
+    - name: minio
+      image: docker.io/minio/minio:REPLACED_BY_CI
+      whitelisted: true
+      platforms:
+        - linux/amd64
+        - linux/arm64
+  # Helm test hook labels (templates should include actual tests)
+  helm.sh/hook-weight: "0"

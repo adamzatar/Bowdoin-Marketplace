@@ -1,0 +1,178 @@
+{{- /*
+Ingress for MinIO (S3 API & Console)
+- Creates up to two Ingress objects: one for the S3 API and one for the Console.
+- Supports separate hosts, shared host with path-based routing, TLS, custom annotations,
+  and multiple extra rules.
+- If only one host is provided, only that Ingress is created.
+*/ -}}
+{{- if .Values.ingress.enabled }}
+{{- $fullName := include "minio.fullname" . | default (printf "%s-minio" .Release.Name) -}}
+{{- $apiService := printf "%s-api" $fullName -}}
+{{- $consoleService := printf "%s-console" $fullName -}}
+{{- $apiPort := .Values.service.ports.api | default 9000 -}}
+{{- $consolePort := .Values.service.ports.console | default 9001 -}}
+{{- $className := .Values.ingress.className | default "" -}}
+
+{{- /* ---------------------------
+     S3 API Ingress (optional)
+     --------------------------- */ -}}
+{{- if or .Values.ingress.api.host (and (not .Values.ingress.api.host) .Values.ingress.sharedHost) }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: storage
+    app.kubernetes.io/component: s3-api
+{{ include "minio.labels" . | nindent 4 }}
+  annotations:
+    # Common hardening & performance knobs for NGINX (only used if NGINX controller is used)
+    nginx.ingress.kubernetes.io/ssl-redirect: "{{ .Values.ingress.forceTLS | default true }}"
+    nginx.ingress.kubernetes.io/proxy-body-size: "{{ .Values.ingress.proxyBodySize | default "50m" }}"
+    nginx.ingress.kubernetes.io/enable-access-log: "{{ .Values.ingress.enableAccessLog | default "false" }}"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    # Optional rate limiting (tuned for S3-style traffic)
+    {{- if .Values.ingress.api.rateLimit }}
+    nginx.ingress.kubernetes.io/limit-rps: "{{ .Values.ingress.api.rateLimit.rps | default 0 }}"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "{{ .Values.ingress.api.rateLimit.burstMultiplier | default 5 }}"
+    {{- end }}
+    {{- with .Values.ingress.api.annotations }}
+{{ toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if $className }}
+  ingressClassName: {{ $className | quote }}
+  {{- end }}
+  {{- if or .Values.ingress.tls .Values.ingress.api.tls }}
+  tls:
+  {{- if .Values.ingress.api.tls }}
+  {{- range .Values.ingress.api.tls }}
+    - secretName: {{ .secretName }}
+      hosts:
+      {{- range .hosts }}
+        - {{ . | quote }}
+      {{- end }}
+  {{- end }}
+  {{- else if .Values.ingress.tls }}
+    - secretName: {{ .Values.ingress.tls.secretName }}
+      hosts:
+      {{- if .Values.ingress.api.host }}
+        - {{ .Values.ingress.api.host | quote }}
+      {{- else if .Values.ingress.sharedHost }}
+        - {{ .Values.ingress.sharedHost | quote }}
+      {{- end }}
+  {{- end }}
+  {{- end }}
+  rules:
+  {{- if .Values.ingress.api.host }}
+    - host: {{ .Values.ingress.api.host | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.api.path | default "/" | quote }}
+            pathType: {{ .Values.ingress.api.pathType | default "Prefix" }}
+            backend:
+              service:
+                name: {{ $apiService }}
+                port:
+                  number: {{ $apiPort }}
+  {{- else if .Values.ingress.sharedHost }}
+    - host: {{ .Values.ingress.sharedHost | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.api.path | default "/s3" | quote }}
+            pathType: {{ .Values.ingress.api.pathType | default "Prefix" }}
+            backend:
+              service:
+                name: {{ $apiService }}
+                port:
+                  number: {{ $apiPort }}
+  {{- end }}
+  {{- with .Values.ingress.api.extraRules }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}
+
+{{- /* ------------------------------
+     Console Ingress (optional)
+     ------------------------------ */ -}}
+{{- if or .Values.ingress.console.host (and (not .Values.ingress.console.host) .Values.ingress.sharedHost) }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}-console
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: storage
+    app.kubernetes.io/component: console
+{{ include "minio.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "{{ .Values.ingress.forceTLS | default true }}"
+    nginx.ingress.kubernetes.io/proxy-body-size: "{{ .Values.ingress.proxyBodySize | default "10m" }}"
+    nginx.ingress.kubernetes.io/enable-access-log: "{{ .Values.ingress.enableAccessLog | default "false" }}"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    # Optional Basic Auth for console (provide secret with 'auth' key: htpasswd format)
+    {{- if .Values.ingress.console.basicAuthSecret }}
+    nginx.ingress.kubernetes.io/auth-type: "basic"
+    nginx.ingress.kubernetes.io/auth-secret: {{ .Values.ingress.console.basicAuthSecret | quote }}
+    nginx.ingress.kubernetes.io/auth-realm: 'Authentication Required'
+    {{- end }}
+    {{- with .Values.ingress.console.annotations }}
+{{ toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if $className }}
+  ingressClassName: {{ $className | quote }}
+  {{- end }}
+  {{- if or .Values.ingress.tls .Values.ingress.console.tls }}
+  tls:
+  {{- if .Values.ingress.console.tls }}
+  {{- range .Values.ingress.console.tls }}
+    - secretName: {{ .secretName }}
+      hosts:
+      {{- range .hosts }}
+        - {{ . | quote }}
+      {{- end }}
+  {{- end }}
+  {{- else if .Values.ingress.tls }}
+    - secretName: {{ .Values.ingress.tls.secretName }}
+      hosts:
+      {{- if .Values.ingress.console.host }}
+        - {{ .Values.ingress.console.host | quote }}
+      {{- else if .Values.ingress.sharedHost }}
+        - {{ .Values.ingress.sharedHost | quote }}
+      {{- end }}
+  {{- end }}
+  {{- end }}
+  rules:
+  {{- if .Values.ingress.console.host }}
+    - host: {{ .Values.ingress.console.host | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.console.path | default "/" | quote }}
+            pathType: {{ .Values.ingress.console.pathType | default "Prefix" }}
+            backend:
+              service:
+                name: {{ $consoleService }}
+                port:
+                  number: {{ $consolePort }}
+  {{- else if .Values.ingress.sharedHost }}
+    - host: {{ .Values.ingress.sharedHost | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.console.path | default "/console" | quote }}
+            pathType: {{ .Values.ingress.console.pathType | default "Prefix" }}
+            backend:
+              service:
+                name: {{ $consoleService }}
+                port:
+                  number: {{ $consolePort }}
+  {{- end }}
+  {{- with .Values.ingress.console.extraRules }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+{{- end }}
+
+{{- end }}

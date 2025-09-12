@@ -1,0 +1,162 @@
+{{- /*
+OpenTelemetry Collector — Service
+Exposes the collector’s receivers (OTLP gRPC/HTTP, etc.) inside the cluster (or externally
+if you choose LoadBalancer/NodePort). Also includes an optional headless Service for
+DNS-based discovery if you later switch to a StatefulSet/DaemonSet topology.
+
+Values used (see values.yaml):
+  service:
+    enabled: true
+    type: ClusterIP | LoadBalancer | NodePort
+    annotations: {}
+    labels: {}
+    externalTrafficPolicy: Local|Cluster   # only when type=LoadBalancer/NodePort
+    ipFamilyPolicy: PreferDualStack|SingleStack|RequireDualStack
+    ipFamilies: [IPv4, IPv6]
+    sessionAffinity: None|ClientIP
+    sessionAffinityConfig: {}              # standard k8s structure
+    topologyAwareHints: false
+    loadBalancerClass: ""                  # optional LB class
+    loadBalancerSourceRanges: []           # CIDRs when type=LoadBalancer
+    ports:                                 # list of ports to expose
+      - name: otlp-grpc
+        port: 4317
+        targetPort: 4317
+        protocol: TCP
+        nodePort: null                     # only used for NodePort
+      - name: otlp-http
+        port: 4318
+        targetPort: 4318
+        protocol: TCP
+      - name: metrics
+        port: 8888
+        targetPort: 8888
+        protocol: TCP
+    extraPorts: []                         # any additional custom ports
+
+  headlessService:
+    enabled: false
+    annotations: {}
+    labels: {}
+*/ -}}
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "otelCollector.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ include "otelCollector.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: collector
+    app.kubernetes.io/part-of: observability
+{{ include "otelCollector.labels" . | nindent 4 }}
+  {{- with .Values.service.labels }}
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.service.annotations }}
+  annotations:
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type | default "ClusterIP" }}
+  {{- with .Values.service.loadBalancerClass }}
+  loadBalancerClass: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if and (or (eq .Values.service.type "LoadBalancer") (eq .Values.service.type "NodePort")) .Values.service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
+  {{- with .Values.service.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ . }}
+  {{- end }}
+  {{- with .Values.service.ipFamilies }}
+  ipFamilies:
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.service.sessionAffinity }}
+  sessionAffinity: {{ . }}
+  {{- end }}
+  {{- with .Values.service.sessionAffinityConfig }}
+  sessionAffinityConfig:
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if hasKey .Values.service "topologyAwareHints" }}
+  internalTrafficPolicy: Cluster
+  {{- if .Values.service.topologyAwareHints }}
+  allocateLoadBalancerNodePorts: true
+  {{- end }}
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ include "otelCollector.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: collector
+  ports:
+    {{- $svcType := .Values.service.type | default "ClusterIP" -}}
+    {{- range $p := .Values.service.ports }}
+    - name: {{ $p.name }}
+      port: {{ $p.port }}
+      targetPort: {{ $p.targetPort | default $p.port }}
+      protocol: {{ $p.protocol | default "TCP" }}
+      {{- if and (or (eq $svcType "NodePort") (eq $svcType "LoadBalancer")) $p.nodePort }}
+      nodePort: {{ $p.nodePort }}
+      {{- end }}
+    {{- end }}
+    {{- with .Values.service.extraPorts }}
+    {{- range . }}
+    - name: {{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .targetPort | default .port }}
+      protocol: {{ .protocol | default "TCP" }}
+      {{- if and (or (eq $svcType "NodePort") (eq $svcType "LoadBalancer")) .nodePort }}
+      nodePort: {{ .nodePort }}
+      {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}
+
+{{- /* Optional headless Service for DNS discovery / future StatefulSet */ -}}
+{{- if and .Values.headlessService.enabled .Values.service.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "otelCollector.fullname" . }}-headless
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ include "otelCollector.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: collector
+    app.kubernetes.io/part-of: observability
+{{ include "otelCollector.labels" . | nindent 4 }}
+  {{- with .Values.headlessService.labels }}
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.headlessService.annotations }}
+  annotations:
+{{ toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: {{ include "otelCollector.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+      protocol: TCP
+    - name: metrics
+      port: 8888
+      targetPort: 8888
+      protocol: TCP
+{{- end }}

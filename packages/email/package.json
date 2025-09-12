@@ -1,0 +1,66 @@
+{
+  "name": "@bowdoin/email",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./sendVerificationEmail": {
+      "types": "./dist/sendVerificationEmail.d.ts",
+      "default": "./dist/sendVerificationEmail.js"
+    },
+    "./templates/*": "./templates/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rimraf dist",
+    "lint": "eslint . --ext .ts,.tsx",
+    "test": "vitest run",
+    "dev:test": "vitest",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "@aws-sdk/client-ses": "^3.883.0",
+    "@bowdoin/config": "workspace:*",
+    "@bowdoin/contracts": "workspace:*",
+    "@bowdoin/observability": "workspace:*",
+    "@bowdoin/utils": "workspace:*",
+    "@react-email/components": "^0.0.18",
+    "@react-email/render": "^0.0.15",
+    "html-to-text": "^9.0.5",
+    "juice": "^11.0.1",
+    "mjml": "^4.15.3",
+    "nodemailer": "^6.10.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/html-to-text": "^9.0.4",
+    "@types/mjml": "^4.7.4",
+    "@types/node": "^20.19.13",
+    "@types/nodemailer": "^6.4.15",
+    "eslint": "^9",
+    "prettier": "^3",
+    "rimraf": "^6.0.1",
+    "tsup": "^8.3.5",
+    "typescript": "^5.9.2",
+    "vitest": "^2.1.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "restricted"
+  }
+}

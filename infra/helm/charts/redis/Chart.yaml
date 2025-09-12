@@ -1,0 +1,57 @@
+# infra/helm/charts/redis/Chart.yaml
+apiVersion: v2
+name: redis
+type: application
+
+description: >
+  Hardened, production-ready Redis chart for Bowdoin Marketplace.
+  Ships a StatefulSet with password auth over TLS (optional), NetworkPolicies,
+  PodDisruptionBudget, ServiceMonitor, and configurable persistence.
+
+# This chart’s own version (SemVer). Bump when you change chart templates/values.
+version: 0.1.0
+
+# The upstream app version. Bump when you upgrade the Redis image/tag.
+appVersion: "7.2"
+
+kubeVersion: ">=1.25.0-0"
+
+home: https://redis.io/
+icon: https://raw.githubusercontent.com/redis/redis/unstable/redis.png
+
+keywords:
+  - redis
+  - cache
+  - kv
+  - statefulset
+  - database
+
+sources:
+  - https://github.com/bowdoin-marketplace/infra
+  - https://github.com/redis/redis
+  - https://artifacthub.io/packages/helm
+
+maintainers:
+  - name: Platform Team
+    email: platform@your-org.example
+    url: https://your-org.example
+
+annotations:
+  # Useful metadata for repositories such as Artifact Hub
+  artifacthub.io/category: database
+  artifacthub.io/links: |
+    - name: Upstream
+      url: https://redis.io/
+    - name: Documentation
+      url: https://redis.io/docs/
+  artifacthub.io/prerelease: "false"
+  # Tell Helm linters we intentionally pin api versions where required.
+  helm.sh/hook-weight: "0"
+
+# We intentionally avoid declaring external dependencies to keep the chart self-contained.
+# If you prefer to reuse third-party charts (e.g., bitnami/redis), you can add them here:
+# dependencies:
+#   - name: redis
+#     version: ">= 19.0.0"
+#     repository: "https://charts.bitnami.com/bitnami"
+#     condition: external.enabled

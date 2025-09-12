@@ -1,0 +1,282 @@
+# infra/helm/charts/redis/values.yaml
+# Opinionated, production-ready defaults for a Redis StatefulSet.
+
+# -----------------
+# Image & Registry
+# -----------------
+image:
+  repository: redis
+  tag: "7.2-alpine"
+  pullPolicy: IfNotPresent
+imagePullSecrets: [] # e.g., ["regcred"]
+
+# -----------------
+# Topology & Scale
+# -----------------
+replicaCount: 3
+statefulset:
+  updateStrategy: RollingUpdate          # OrderedReady for careful one-by-one rollouts
+  podManagementPolicy: Parallel          # Speed up initial cluster bring-up
+  revisionHistoryLimit: 3
+  terminationGracePeriodSeconds: 30
+  priorityClassName: ""                  # e.g., "high-priority"
+  enableServiceLinks: false
+
+# -----------------
+# Authentication
+# -----------------
+auth:
+  enabled: true
+  # Prefer to use an external/existing secret in production. If provided,
+  # it must contain key: REDIS_PASSWORD
+  existingSecretName: ""                 # e.g., "redis-auth"
+  # For non-prod only. If set and existingSecretName is empty, a Secret is created.
+  password: ""                           # leave empty; inject via external secret manager
+  # If true and password is set (and no existing secret), the chart will create a secret.
+  createSecret: true
+  # Username support (Redis ACL). Leave empty to use default user.
+  username: ""                           # e.g., "default"
+
+# -----------------
+# TLS (optional)
+# -----------------
+tls:
+  enabled: false
+  # If using cert-manager, provide an issuer; otherwise specify existingSecretName below.
+  certManager:
+    enabled: false
+    issuerRef:
+      kind: ClusterIssuer
+      name: letsencrypt-prod
+    # DNS names the cert should be valid for (templated in the chart).
+    dnsNames: [] # e.g., ["redis.bowdoin.svc", "redis-headless.bowdoin.svc"]
+  # Use an existing TLS secret with keys: tls.crt, tls.key, ca.crt (optional).
+  existingSecretName: ""
+  # Enforce client cert auth if desired.
+  requireClientAuth: false
+
+# -----------------
+# Service
+# -----------------
+service:
+  type: ClusterIP
+  port: 6379
+  annotations: {}
+  labels: {}
+  # Stickiness at kube-proxy level (rarely needed)
+  sessionAffinity: None
+
+# Headless service for StatefulSet stable DNS
+headlessService:
+  enabled: true
+  annotations: {}
+  labels: {}
+
+# -----------------
+# Persistence
+# -----------------
+persistence:
+  enabled: true
+  accessModes: ["ReadWriteOnce"]
+  size: 20Gi
+  storageClassName: "" # e.g., "gp3", "premium-rwo"
+  annotations: {}
+  labels: {}
+  selector: {}         # Match existing PV if needed
+
+# -----------------
+# Resources & Scheduling
+# -----------------
+resources:
+  requests:
+    cpu: "250m"
+    memory: "512Mi"
+  limits:
+    cpu: "1000m"
+    memory: "2Gi"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints:
+  enabled: true
+  rules:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector: {}
+
+# -----------------
+# Security Contexts
+# -----------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# -----------------
+# Health Probes
+# -----------------
+# For password-protected deployments, tcpSocket is the safest generic check.
+livenessProbe:
+  tcpSocket:
+    port: redis
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+  successThreshold: 1
+
+readinessProbe:
+  tcpSocket:
+    port: redis
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 3
+  successThreshold: 1
+
+startupProbe:
+  tcpSocket:
+    port: redis
+  initialDelaySeconds: 3
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 30
+
+# -----------------
+# Configuration
+# -----------------
+# Minimal, safe defaults. You can append more config directives if needed.
+config:
+  appendonly: "yes"            # Use AOF for durability
+  appendfsync: "everysec"      # Reasonable fsync cadence
+  save: []                     # Disable RDB snapshots by default (AOF only)
+  maxmemoryPolicy: "allkeys-lru"
+  # maxmemory is intentionally unset; set a value like "1536mb" to enforce eviction.
+  extraConfig: []              # e.g., ["notify-keyspace-events Ex", "hash-max-ziplist-entries 512"]
+
+# Add/override environment variables on the Redis container
+extraEnv: []
+# - name: MY_ENV
+#   value: "val"
+
+# Extra annotations/labels
+podAnnotations: {}
+podLabels:
+  app.kubernetes.io/part-of: bowdoin-marketplace
+
+# -----------------
+# NetworkPolicy
+# -----------------
+networkPolicy:
+  enabled: true
+  # Default deny all, then selectively allow within namespace + from allowed namespaces.
+  defaultDeny:
+    egress: true
+    ingress: true
+  # Allow intra-namespace by default (typical for service-to-service)
+  allowSameNamespace: true
+  # Additional namespaces allowed to connect to Redis (for example, jobs or monitoring)
+  allowedNamespaces: [] # e.g., ["bowdoin", "monitoring"]
+  # Allow DNS egress to kube-dns
+  allowDNS: true
+  # Extra egress rules, if needed (raw NetworkPolicy egress entries)
+  extraEgress: []
+  extraIngress: []
+
+# -----------------
+# Metrics & Monitoring
+# -----------------
+metrics:
+  enabled: true
+  image:
+    repository: oliver006/redis_exporter
+    tag: v1.62.0
+    pullPolicy: IfNotPresent
+  port: 9121
+  # Extra args to exporter; see https://github.com/oliver006/redis_exporter#options
+  extraArgs: []
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+  # Prometheus Operator ServiceMonitor
+  serviceMonitor:
+    enabled: true
+    namespace: "monitoring"
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    annotations: {}
+    relabelings: []
+    metricRelabelings: []
+
+# -----------------
+# PDB (Pod Disruption Budget)
+# -----------------
+pdb:
+  enabled: true
+  minAvailable: 2
+
+# -----------------
+# ServiceAccount (usually default SA is okay)
+# -----------------
+serviceAccount:
+  create: false
+  name: "" # use default
+  annotations: {}
+
+# -----------------
+# RBAC (not required for Redis itself)
+# -----------------
+rbac:
+  create: false
+
+# -----------------
+# Logging
+# -----------------
+logging:
+  # Use Redis stdout logs; you can also mount a config to tweak "loglevel".
+  level: "notice"  # debug | verbose | notice | warning
+
+# -----------------
+# Init / Sidecars
+# -----------------
+initContainers: []
+# - name: volume-permissions
+#   image: busybox:1.36
+#   command: ["sh", "-c", "chown -R 1001:1001 /data"]
+#   securityContext:
+#     runAsUser: 0
+#   volumeMounts:
+#     - name: data
+#       mountPath: /data
+
+sidecars: []
+# - name: lua-scripts-loader
+#   image: alpine:3.20
+#   command: ["sh", "-c", "echo 'ok'"]
+
+# -----------------
+# Volumes & Mounts (extras)
+# -----------------
+extraVolumes: []
+extraVolumeMounts: []
+
+# -----------------
+# Annotations for the StatefulSet/Pods
+# -----------------
+annotations:
+  checksum/config: "" # set via template to force rollout on config changes

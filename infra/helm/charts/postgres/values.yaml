@@ -1,0 +1,326 @@
+# infra/helm/charts/postgres/values.yaml
+#
+# Opinionated, production-ready defaults for the Postgres umbrella chart.
+# This wraps Bitnami's `postgresql` and (optionally) the Prometheus exporter.
+#
+# NOTE:
+# - Secrets (passwords, TLS keys) should come from pre-created Kubernetes Secrets.
+# - Storage is stateful; use a real StorageClass with snapshots & backups.
+# - Networking is locked down; open only what you need.
+
+# ------------------------------------------------------------------------------
+# GLOBAL (chart wrapper)
+# ------------------------------------------------------------------------------
+nameOverride: ""
+fullnameOverride: "postgres"
+namespaceOverride: "" # set at install time with -n; this is a safety valve
+
+# Turn components on/off
+postgresql:
+  enabled: true
+
+monitoring:
+  exporter:
+    # If you prefer a standalone exporter instead of Bitnami's built-in one
+    # enable this and DISABLE `postgresql.metrics.enabled` below to avoid dup scrape.
+    enabled: false
+    # The exporter needs DB creds. Use a dedicated user with VIEW STATS privileges.
+    # This chart consumes:
+    #   - POSTGRES_EXPORTER_DSN    (optional, overrides individual vars)
+    #   - DATA_SOURCE_URI          (host:port/db)
+    #   - DATA_SOURCE_USER
+    #   - DATA_SOURCE_PASS
+    # Provide them via an existing secret (recommended).
+    existingSecretName: ""      # e.g. "postgres-exporter-credentials"
+    env:
+      # Fallbacks if you don't provide a secret.
+      dataSourceUri: ""         # e.g. "postgresql.default.svc.cluster.local:5432/appdb?sslmode=disable"
+      user: ""                  # e.g. "metrics"
+      pass: ""                  # e.g. "REDACTED"
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+    serviceMonitor:
+      enabled: true
+      namespace: ""             # default to release namespace
+      interval: 30s
+      scrapeTimeout: 10s
+      honorLabels: true
+      additionalLabels:
+        release: kube-prometheus-stack
+      relabelings: []
+      metricRelabelings: []
+    podMonitor:
+      enabled: false            # prefer ServiceMonitor when using Prom Operator
+
+# ------------------------------------------------------------------------------
+# BITNAMI POSTGRESQL VALUES (v15.x of the chart; appVersion Postgres 16.x)
+# Full reference: https://github.com/bitnami/charts/tree/main/bitnami/postgresql
+# ------------------------------------------------------------------------------
+postgresql:
+  image:
+    registry: docker.io
+    repository: bitnami/postgresql
+    tag: "16.4.0-debian-12-r0"
+    pullPolicy: IfNotPresent
+
+  # Use Kubernetes Secrets for credentials.
+  auth:
+    enablePostgresUser: true
+    # Create a dedicated app user/database, but DO NOT set plain-text secrets here.
+    username: "appuser"
+    database: "appdb"
+    # Reference an existing secret that provides:
+    #   - postgres-password
+    #   - password           (for appuser)
+    #   - replication-password (if replication.enabled)
+    existingSecret: "postgres-credentials"
+    # optional: existing secret keys override (only if your keys differ from defaults)
+    secretKeys:
+      adminPasswordKey: "postgres-password"
+      userPasswordKey: "password"
+      replicationPasswordKey: "replication-password"
+
+  primary:
+    # Stateful storage for the primary
+    persistence:
+      enabled: true
+      existingClaim: ""           # leave empty to let chart create a PVC
+      storageClass: ""            # e.g. "gp3" / "fast-ssd" / "premium-rwo"
+      size: 100Gi
+      accessModes:
+        - ReadWriteOnce
+      annotations: {}
+      selector: {}
+
+    # Health probes tuned for production-ish workloads
+    startupProbe:
+      enabled: true
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 30
+      successThreshold: 1
+    livenessProbe:
+      enabled: true
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 6
+      successThreshold: 1
+    readinessProbe:
+      enabled: true
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 6
+      successThreshold: 1
+
+    # Resource requests & limits — size for your workload + HPA on CPU if desired
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+
+    # Security hardening
+    podSecurityContext:
+      enabled: true
+      fsGroup: 1001
+      runAsUser: 1001
+      runAsGroup: 1001
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+    containerSecurityContext:
+      enabled: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+      readOnlyRootFilesystem: true
+
+    # Network
+    service:
+      type: ClusterIP
+      ports:
+        postgresql: 5432
+      annotations: {}
+      labels: {}
+
+    # TLS for in-cluster traffic (optional). Provide secret with server certs.
+    tls:
+      enabled: false
+      autoGenerated: false
+      preferServerCiphers: true
+      certificatesSecret: ""   # secret must contain: server.crt, server.key, ca.crt (optional)
+      certFilename: "server.crt"
+      certKeyFilename: "server.key"
+      certCAFilename: "ca.crt"
+
+    # Extra init scripts & config
+    initdb:
+      scripts: {}               # map of filename: script content (NOT recommended in Git)
+      user: ""
+      password: ""
+    extendedConfiguration: |-
+      # Reasonable defaults (tune for your cluster & workload)
+      shared_buffers = 512MB
+      effective_cache_size = 1536MB
+      maintenance_work_mem = 128MB
+      wal_level = replica
+      max_wal_size = 1GB
+      min_wal_size = 80MB
+      random_page_cost = 1.1
+      effective_io_concurrency = 200
+      checkpoint_timeout = 15min
+      max_connections = 200
+
+    # Sidecars / volumes (e.g., wal-g or cloud-sql-proxy) — customize as needed
+    extraEnvVars: []
+    extraEnvVarsSecret: ""       # e.g., "postgres-additional-env"
+    extraVolumes: []
+    extraVolumeMounts: []
+    sidecars: []
+    initContainers: []
+
+    # Pod placement
+    nodeSelector: {}
+    tolerations: []
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/name
+                    operator: In
+                    values:
+                      - postgresql
+
+  # Optional read replicas (streaming replication)
+  readReplicas:
+    enabled: false
+    replicaCount: 2
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "512Mi"
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+    podSecurityContext:
+      enabled: true
+      fsGroup: 1001
+      runAsUser: 1001
+      runAsGroup: 1001
+      runAsNonRoot: true
+    containerSecurityContext:
+      enabled: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+      readOnlyRootFilesystem: true
+    persistence:
+      enabled: true
+      storageClass: ""
+      size: 100Gi
+      accessModes: ["ReadWriteOnce"]
+
+  # Enable Bitnami’s built-in metrics exporter (mutually exclusive with umbrella exporter)
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      namespace: ""               # default to release namespace
+      interval: 30s
+      scrapeTimeout: 10s
+      honorLabels: true
+      additionalLabels:
+        release: kube-prometheus-stack
+      relabelings: []
+      metricRelabelings: []
+
+  # NetworkPolicy to lock the DB to the namespace & known apps
+  networkPolicy:
+    enabled: true
+    allowExternal: false
+    additionalRules:
+      - podSelector:
+          matchLabels:
+            app.kubernetes.io/part-of: bowdoin-marketplace
+        namespaceSelector: {}
+        ports:
+          - protocol: TCP
+            port: 5432
+
+  # Volume permissions init container if needed by your storage class
+  volumePermissions:
+    enabled: true
+    image:
+      registry: docker.io
+      repository: bitnami/os-shell
+      tag: "12-debian-12-r32"
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 50m
+        memory: 64Mi
+
+  # Pod Disruption Budget for the primary (keep >0 available during disruptions)
+  pdb:
+    create: true
+    minAvailable: 1
+
+  # Top-level common labels/annotations
+  commonLabels:
+    app.kubernetes.io/part-of: bowdoin-marketplace
+    security.bowdoin.io/tier: "data"
+  commonAnnotations:
+    backup.bowdoin.io/has-backups: "true"
+
+# ------------------------------------------------------------------------------
+# OVERRIDES FOR K8S SERVICE/PDB/LABELS EXPOSED BY UPSTREAM
+# (Typically not changed; included for completeness)
+# ------------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false
+  annotations: {}
+
+# ------------------------------------------------------------------------------
+# NOTES & OPERATIONAL GUARDRAILS
+# ------------------------------------------------------------------------------
+# 1) Create credentials secret before install:
+#    kubectl -n <ns> create secret generic postgres-credentials \
+#      --from-literal=postgres-password='<admin_pw>' \
+#      --from-literal=password='<app_pw>' \
+#      --from-literal=replication-password='<rep_pw>'
+#
+# 2) Optional: TLS secret (if postgresql.primary.tls.enabled=true):
+#    kubectl -n <ns> create secret generic postgres-tls \
+#      --from-file=server.crt --from-file=server.key --from-file=ca.crt
+#
+# 3) Backups: prefer an external operator (e.g., Stash, CloudNativePG, Velero, or WAL-G sidecar).
+#    You can add a WAL-G sidecar via `postgresql.primary.sidecars` and attach secrets via
+#    `postgresql.primary.extraVolumes/extraVolumeMounts`.
+#
+# 4) Network: The chart’s NetworkPolicy restricts ingress to labeled pods within the cluster.
+#    If your app runs in a different namespace, add an additional rule under
+#    `postgresql.networkPolicy.additionalRules` with an appropriate namespaceSelector.
+#
+# 5) Scaling: For read-heavy workloads, enable readReplicas; for write-heavy, scale vertically.
+#
+# 6) Monitoring: Use either `postgresql.metrics.enabled=true` OR `monitoring.exporter.enabled=true`
+#    but not both. ServiceMonitor is enabled by default to integrate with kube-prometheus-stack.

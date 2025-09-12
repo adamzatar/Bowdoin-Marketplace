@@ -1,0 +1,256 @@
+# infra/helm/charts/app/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ default .Chart.Name .Values.app.name | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    app.kubernetes.io/part-of: bowdoin-marketplace
+    app.kubernetes.io/component: web
+    metrics.exposed: {{ ternary "true" "false" (default true .Values.monitoring.enabled) | quote }}
+  annotations:
+    # Roll the Deployment on config/secret changes
+    checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    {{- if (hasKey .Values "secretChecksum") }}
+    checksum/secret: {{ .Values.secretChecksum | quote }}
+    {{- end }}
+    {{- with .Values.deployment.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if .Values.deployment.replicas }}
+  replicas: {{ .Values.deployment.replicas }}
+  {{- end }}
+  revisionHistoryLimit: {{ default 5 .Values.deployment.revisionHistoryLimit }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ default "25%" .Values.deployment.strategy.maxSurge | quote }}
+      maxUnavailable: {{ default "25%" .Values.deployment.strategy.maxUnavailable | quote }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/part-of: bowdoin-marketplace
+        app.kubernetes.io/component: web
+        metrics.exposed: {{ ternary "true" "false" (default true .Values.monitoring.enabled) | quote }}
+        {{- with .Values.pod.labels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Hints to service meshes / sidecars etc.
+        {{- if .Values.pod.annotations }}
+        {{- toYaml .Values.pod.annotations | nindent 8 }}
+        {{- end }}
+        # Make sure proxies trust X-Forwarded-* from your ingress
+        traffic.sidecar.istio.io/includeInboundPorts: "*"
+    spec:
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName | quote }}
+      {{- end }}
+      serviceAccountName: {{ default "default" .Values.serviceAccountName | quote }}
+      automountServiceAccountToken: {{ ternary "true" "false" (default false .Values.pod.automountToken) }}
+      dnsPolicy: ClusterFirst
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ default 30 .Values.pod.terminationGracePeriodSeconds }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . | quote }}
+        {{- end }}
+      {{- end }}
+      securityContext:
+        fsGroup: {{ default 2000 .Values.podSecurity.fsGroup }}
+        fsGroupChangePolicy: {{ default "OnRootMismatch" .Values.podSecurity.fsGroupChangePolicy | quote }}
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if .Values.initContainers }}
+      initContainers:
+        {{- toYaml .Values.initContainers | nindent 8 }}
+      {{- else if (default false .Values.app.runMigrations) }}
+        - name: migrate
+          image: {{ required "values.image.repository is required" .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}
+          imagePullPolicy: {{ default "IfNotPresent" .Values.image.pullPolicy }}
+          command: {{ toYaml (default (list "/bin/sh" "-lc") .Values.app.migrate.command) | nindent 10 }}
+          args:
+            - {{ default "node packages/db/dist/migrate.js" .Values.app.migrate.script | quote }}
+          envFrom:
+            - configMapRef:
+                name: {{ default (printf "%s-config" .Chart.Name) .Values.app.configMapName }}
+            {{- if .Values.app.secretName }}
+            - secretRef:
+                name: {{ .Values.app.secretName }}
+            {{- end }}
+          resources:
+            {{- toYaml (default dict .Values.resources.init) | nindent 12 }}
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      {{- end }}
+      containers:
+        - name: web
+          image: {{ required "values.image.repository is required" .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}
+          imagePullPolicy: {{ default "IfNotPresent" .Values.image.pullPolicy }}
+          {{- $httpPort := (default 3000 .Values.app.port) -}}
+          ports:
+            - name: http
+              containerPort: {{ $httpPort }}
+              protocol: TCP
+          env:
+            # Hard non-secret env
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: {{ $httpPort | quote }}
+            - name: TZ
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ default (printf "%s-config" .Chart.Name) .Values.app.configMapName }}
+                  key: TZ
+            # Health endpoints (can be overridden)
+            - name: HEALTHZ_PATH
+              value: {{ default "/api/healthz" .Values.app.health.path | quote }}
+            - name: READYZ_PATH
+              value: {{ default "/api/readyz" .Values.app.ready.path | quote }}
+            {{- if .Values.observability.enabled }}
+            - name: OTEL_SERVICE_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ default (printf "%s-config" .Chart.Name) .Values.app.configMapName }}
+                  key: OTEL_SERVICE_NAME
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ default (printf "%s-config" .Chart.Name) .Values.app.configMapName }}
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ default (printf "%s-config" .Chart.Name) .Values.app.configMapName }}
+                  key: OTEL_EXPORTER_OTLP_PROTOCOL
+            - name: OTEL_TRACES_SAMPLER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ default (printf "%s-config" .Chart.Name) .Values.app.configMapName }}
+                  key: OTEL_TRACES_SAMPLER
+            - name: OTEL_TRACES_SAMPLER_ARG
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ default (printf "%s-config" .Chart.Name) .Values.app.configMapName }}
+                  key: OTEL_TRACES_SAMPLER_ARG
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ default (printf "%s-config" .Chart.Name) .Values.app.configMapName }}
+            {{- if .Values.app.secretName }}
+            - secretRef:
+                name: {{ .Values.app.secretName }}
+            {{- end }}
+          {{- if or .Values.pod.command .Values.pod.args }}
+          command: {{- if .Values.pod.command }} {{ toYaml .Values.pod.command | nindent 12 }} {{- end }}
+          args: {{- if .Values.pod.args }} {{ toYaml .Values.pod.args | nindent 12 }} {{- end }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: {{ default "/api/readyz" .Values.app.ready.path }}
+              port: http
+            initialDelaySeconds: {{ default 5 .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ default 5 .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ default 2 .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ default 6 .Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: {{ default "/api/healthz" .Values.app.health.path }}
+              port: http
+            initialDelaySeconds: {{ default 10 .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ default 10 .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ default 2 .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ default 6 .Values.probes.liveness.failureThreshold }}
+          startupProbe:
+            httpGet:
+              path: {{ default "/api/readyz" .Values.app.ready.path }}
+              port: http
+            initialDelaySeconds: {{ default 0 .Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ default 5 .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ default 3 .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ default 30 .Values.probes.startup.failureThreshold }}
+          resources:
+            {{- toYaml (default dict .Values.resources.main) | nindent 12 }}
+          securityContext:
+            runAsUser: {{ default 10001 .Values.containerSecurity.runAsUser }}
+            runAsGroup: {{ default 10001 .Values.containerSecurity.runAsGroup }}
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: config-public
+              mountPath: /app/config
+              readOnly: true
+              {{- if .Values.app.subPath }}
+              subPath: {{ .Values.app.subPath | quote }}
+              {{- end }}
+        {{- if .Values.sidecars }}
+        {{- toYaml .Values.sidecars | nindent 8 }}
+        {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ default "256Mi" .Values.pod.tmpSize }}
+        - name: config-public
+          configMap:
+            name: {{ default (printf "%s-config" .Chart.Name) .Values.app.configMapName }}
+            optional: false
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- else }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: {{ .Chart.Name }}
+                    app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- else }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

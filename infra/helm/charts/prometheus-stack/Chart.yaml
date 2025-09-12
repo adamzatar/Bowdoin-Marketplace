@@ -1,0 +1,79 @@
+apiVersion: v2
+name: prometheus-stack
+description: >
+  Umbrella chart that installs and configures the Prometheus monitoring stack for the
+  cluster (Prometheus, Alertmanager, Grafana, kube-state-metrics, node-exporter, rules,
+  ServiceMonitors, and CRDs) via the upstream kube-prometheus-stack, with optional
+  Prometheus Adapter for Kubernetes custom metrics.
+
+type: application
+
+# ⚠️ Chart version of THIS umbrella chart (semver). Bump on any chart change.
+version: 0.1.0
+
+# App version is an arbitrary, human-readable release tag for the stack you run.
+# It does not have to match the dependency versions; use it for your platform release.
+appVersion: "1.0.0"
+
+kubeVersion: ">=1.25.0-0"
+
+home: https://prometheus.io/
+icon: https://raw.githubusercontent.com/prometheus/prometheus/main/documentation/images/prometheus-logo.png
+keywords:
+  - observability
+  - monitoring
+  - metrics
+  - prometheus
+  - grafana
+  - alerting
+  - kube-prometheus
+sources:
+  - https://github.com/prometheus-community/helm-charts
+  - https://github.com/prometheus-operator/kube-prometheus
+  - https://github.com/prometheus-operator/prometheus-operator
+maintainers:
+  - name: Platform Team
+    email: platform@example.com
+
+annotations:
+  # Artifact Hub metadata (helps with internal registries too)
+  artifacthub.io/category: monitoring-logging
+  artifacthub.io/links: |
+    - name: Upstream Helm Charts
+      url: https://github.com/prometheus-community/helm-charts
+    - name: Prometheus Operator
+      url: https://github.com/prometheus-operator/prometheus-operator
+    - name: Kube Prometheus
+      url: https://github.com/prometheus-operator/kube-prometheus
+  artifacthub.io/images: |
+    - name: prometheus
+      image: quay.io/prometheus/prometheus
+    - name: alertmanager
+      image: quay.io/prometheus/alertmanager
+    - name: grafana
+      image: docker.io/grafana/grafana
+    - name: kube-state-metrics
+      image: registry.k8s.io/kube-state-metrics/kube-state-metrics
+    - name: node-exporter
+      image: quay.io/prometheus/node-exporter
+  artifacthub.io/containsSecurityUpdates: "false"
+
+# Dependencies are pinned with a compatible range. Actual versions are chosen at lock time.
+dependencies:
+  # Core stack (Prometheus Operator + CRDs + Grafana + exporters)
+  - name: kube-prometheus-stack
+    alias: kubePrometheusStack
+    version: ">=62.0.0 <70.0.0"
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: kubePrometheusStack.enabled
+
+  # Optional: Kubernetes Custom/External Metrics API adapter backed by Prometheus
+  # Useful for HPA on custom metrics (e.g., queue depth, request rate).
+  - name: prometheus-adapter
+    alias: prometheusAdapter
+    version: ">=4.10.0 <6.0.0"
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: prometheusAdapter.enabled
+
+# This chart ships only templates/values for configuration & extra manifests (PDBs, NetPols, RBAC),
+# while the heavy lifting is done by the upstream dependency charts.

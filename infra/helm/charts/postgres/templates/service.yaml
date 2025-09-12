@@ -1,0 +1,73 @@
+# infra/helm/charts/postgres/templates/service.yaml
+#
+# Client-facing Service for PostgreSQL primary.
+# Pairs with the headless service defined alongside the StatefulSet.
+# Supports ClusterIP/NodePort/LoadBalancer, optional session affinity,
+# and optional metrics port when the exporter sidecar is enabled.
+
+{{- $fullname := ternary .Values.fullnameOverride (printf "%s-postgres" .Release.Name) (hasKey .Values "fullnameOverride" | and (ne .Values.fullnameOverride "")) -}}
+{{- $ns := default .Release.Namespace .Values.namespaceOverride -}}
+{{- $labels := dict "app.kubernetes.io/name" "postgres" "app.kubernetes.io/instance" .Release.Name "app.kubernetes.io/managed-by" "Helm" "app.kubernetes.io/part-of" "bowdoin-marketplace" -}}
+{{- $pri := .Values.postgresql.primary -}}
+{{- $svc := $pri.service -}}
+{{- $exporter := .Values.monitoring.exporter -}}
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ $ns }}
+  labels:
+    {{- range $k, $v := $labels }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+  annotations:
+    {{- if $svc.annotations }}
+    {{- toYaml $svc.annotations | nindent 4 }}
+    {{- end }}
+spec:
+  type: {{ $svc.type | default "ClusterIP" }}
+  {{- if and (eq ($svc.type | default "ClusterIP") "ClusterIP") ($svc.clusterIP) }}
+  clusterIP: {{ $svc.clusterIP | quote }}
+  {{- end }}
+  {{- if eq ($svc.type | default "ClusterIP") "LoadBalancer" }}
+  {{- if $svc.loadBalancerIP }}
+  loadBalancerIP: {{ $svc.loadBalancerIP | quote }}
+  {{- end }}
+  {{- if $svc.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml $svc.loadBalancerSourceRanges | nindent 4 }}
+  {{- end }}
+  externalTrafficPolicy: {{ $svc.externalTrafficPolicy | default "Cluster" }}
+  {{- end }}
+  {{- if eq ($svc.type | default "ClusterIP") "NodePort" }}
+  externalTrafficPolicy: {{ $svc.externalTrafficPolicy | default "Cluster" }}
+  {{- end }}
+  {{- if $svc.sessionAffinity }}
+  sessionAffinity: {{ $svc.sessionAffinity | default "None" }}
+  {{- if and (eq ($svc.sessionAffinity | default "None") "ClientIP") ($svc.sessionAffinityConfig) }}
+  sessionAffinityConfig:
+    {{- toYaml $svc.sessionAffinityConfig | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  publishNotReadyAddresses: {{ $svc.publishNotReady | default false }}
+  selector:
+    app.kubernetes.io/name: "postgres"
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+  ports:
+    - name: tcp-postgres
+      port: {{ $svc.ports.postgresql | default 5432 }}
+      targetPort: tcp-postgres
+      protocol: TCP
+      {{- if and (eq ($svc.type | default "ClusterIP") "NodePort") ($svc.nodePorts.postgresql) }}
+      nodePort: {{ $svc.nodePorts.postgresql }}
+      {{- end }}
+    {{- if and $exporter.enabled ($exporter.service.enabled | default true) }}
+    - name: metrics
+      port: {{ $exporter.service.port | default 9187 }}
+      targetPort: metrics
+      protocol: TCP
+      {{- if and (eq ($svc.type | default "ClusterIP") "NodePort") ($svc.nodePorts.metrics) }}
+      nodePort: {{ $svc.nodePorts.metrics }}
+      {{- end }}
+    {{- end }}

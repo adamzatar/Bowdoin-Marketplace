@@ -1,0 +1,89 @@
+# infra/helm/charts/redis/templates/pvc.yaml
+{{- /*
+Creates a PersistentVolumeClaim for Redis **only** when:
+  - persistence.enabled: true
+  - persistence.create:  true
+If you prefer using a StatefulSet volumeClaimTemplates (default for this chart),
+leave persistence.create = false. If you want to bind to a pre-existing PVC,
+set persistence.existingClaim in values and keep persistence.create = false.
+
+Supported values (see values.yaml):
+  persistence:
+    enabled: true|false
+    create: true|false
+    existingClaim: "<name>"            # if set AND create=false, the chart will use it
+    size: "10Gi"
+    accessModes: ["ReadWriteOnce"]
+    storageClass: ""                   # "", "-", or a class name
+    volumeMode: "Filesystem"           # or "Block"
+    annotations: {}
+    labels: {}
+    selector:                          # optional PV selector
+      matchLabels: {}
+      matchExpressions: []
+    dataSourceRef:                     # optional, for snapshots/Clones (>=1.20)
+      apiGroup: "snapshot.storage.k8s.io"
+      kind: "VolumeSnapshot"
+      name: "<snapshot-name>"
+*/ -}}
+{{- if and .Values.persistence.enabled .Values.persistence.create }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ default (printf "%s-data" (include "redis.fullname" .)) .Values.persistence.existingClaim | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ include "redis.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: cache
+    helm.sh/chart: {{ include "redis.chart" . }}
+    {{- with .Values.persistence.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.persistence.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- range $m := (.Values.persistence.accessModes | default (list "ReadWriteOnce")) }}
+    - {{ $m | quote }}
+    {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size | default "10Gi" | quote }}
+  {{- if hasKey .Values.persistence "volumeMode" }}
+  volumeMode: {{ .Values.persistence.volumeMode | default "Filesystem" | quote }}
+  {{- end }}
+  {{- /* storageClassName semantics:
+        - if value is "-", omit the field to use cluster default
+        - if value is empty string "", set storageClassName: "" to disable dynamic provisioning
+        - else set the named storageClass
+  */ -}}
+  {{- if .Values.persistence.storageClass }}
+  {{- if eq .Values.persistence.storageClass "-" }}
+  {{- /* omit storageClassName entirely */ -}}
+  {{- else }}
+  storageClassName: {{ .Values.persistence.storageClass | quote }}
+  {{- end }}
+  {{- else }}
+  storageClassName: ""
+  {{- end }}
+  {{- with .Values.persistence.selector }}
+  selector:
+    {{- if or .matchLabels .matchExpressions }}
+    {{- if .matchLabels }}
+    matchLabels:
+      {{- toYaml .matchLabels | nindent 6 }}
+    {{- end }}
+    {{- if .matchExpressions }}
+    matchExpressions:
+      {{- toYaml .matchExpressions | nindent 6 }}
+    {{- end }}
+    {{- end }}
+  {{- end }}
+  {{- with .Values.persistence.dataSourceRef }}
+  dataSourceRef:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

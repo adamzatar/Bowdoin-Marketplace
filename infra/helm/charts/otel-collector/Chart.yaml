@@ -1,0 +1,63 @@
+apiVersion: v2
+name: otel-collector
+description: >
+  OpenTelemetry Collector (Gateway/Agent) for the Bowdoin Marketplace stack.
+  Ships traces, metrics, and logs to your chosen backends with TLS, auth,
+  and production defaults. Designed to run as a Deployment (gateway) with
+  optional DaemonSet/agent sidecars.
+
+type: application
+version: 0.1.0               # Chart version (bump on any chart change)
+appVersion: "0.93.0"         # Upstream otelcol-contrib image tag you target by default
+kubeVersion: ">=1.24.0-0"    # Uses policy APIs and metrics.k8s.io
+
+home: https://opentelemetry.io/docs/collector/
+icon: https://opentelemetry.io/img/logos/opentelemetry-horizontal-color.png
+
+keywords:
+  - observability
+  - opentelemetry
+  - tracing
+  - metrics
+  - logging
+  - collector
+  - tempo
+  - loki
+  - prometheus
+  - otlp
+
+maintainers:
+  - name: Platform Team
+    email: platform@bowdoin.example
+    url: https://github.com/bowdoin-marketplace
+
+sources:
+  - https://github.com/open-telemetry/opentelemetry-collector
+  - https://github.com/open-telemetry/opentelemetry-collector-contrib
+  - https://github.com/bowdoin-marketplace/infra
+
+annotations:
+  # Artifact Hub metadata (optional but recommended)
+  artifacthub.io/category: monitoring-logging
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/links: |
+    - name: OpenTelemetry
+      url: https://opentelemetry.io/
+    - name: Collector Docs
+      url: https://opentelemetry.io/docs/collector/
+  artifacthub.io/images: |
+    - name: otelcol-contrib
+      image: otel/opentelemetry-collector-contrib:0.93.0
+  artifacthub.io/changes: |
+    - kind: added
+      description: Initial release of Bowdoin Marketplace OpenTelemetry Collector chart with gateway mode, HPA hooks, and ServiceMonitor support.
+  # Helpful hints for chart consumers
+  bowdoin.io/purpose: "Central OTEL gateway for traces, metrics, and logs"
+  bowdoin.io/scoped-to: "namespace"
+
+# Notes for future maintainers:
+# - This chart expects CRDs from kube-prometheus-stack if ServiceMonitor is enabled.
+#   Do NOT bundle CRDs here; install/own them at the platform level.
+# - If you route traces to Tempo and logs to Loki, keep those endpoints configurable
+#   in values.yaml and do not hardcode secrets in templates.
+# - When bumping appVersion, review upstream breaking changes for receivers/exporters.

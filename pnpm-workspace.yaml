@@ -1,0 +1,39 @@
+# pnpm-workspace.yaml
+packages:
+  # Application(s)
+  - "apps/*"
+
+  # Shared backend/frontend packages
+  - "packages/*"
+
+  # Infra & tooling not bundled for web but still part of monorepo
+  - "scripts"
+
+# Enable strict linking rules — no phantom deps
+packageManager: "pnpm@9.0.0"
+
+# Options to enforce consistency & optimize installs
+neverBuiltDependencies:
+  # Native modules you want to skip rebuilding in CI/CD
+  # (add if you use e.g. `fsevents`, not needed on Linux)
+  - fsevents
+
+# Prefer workspace protocol to ensure packages resolve locally first
+link-workspace-packages: true
+
+# Prevent accidental dependency leaks across workspaces
+strict-peer-dependencies: true
+
+# Deduplicate deps aggressively to reduce node_modules bloat
+prefer-workspace-packages: true
+
+# Hoist only dev tooling, keep app/pkg runtime deps isolated
+hoist-pattern:
+  - "*eslint*"
+  - "*prettier*"
+  - "typescript"
+  - "vitest"
+  - "playwright"
+  - "husky"
+  - "lint-staged"
+  - "changeset*"

@@ -1,0 +1,58 @@
+{
+  "name": "@bowdoin/rate-limit",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Redis-backed token-bucket and helpers for per-user/IP rate limiting across the Bowdoin Marketplace monorepo.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Bowdoin Marketplace Team",
+  "engines": {
+    "node": ">=18.18"
+  },
+  "sideEffects": false,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./redisClient": {
+      "types": "./dist/redisClient.d.ts",
+      "import": "./dist/redisClient.js"
+    },
+    "./tokenBucket": {
+      "types": "./dist/tokenBucket.d.ts",
+      "import": "./dist/tokenBucket.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "clean": "rimraf dist",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint \"src/**/*.{ts,tsx,mts,cts}\"",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@bowdoin/config": "workspace:*",
+    "@bowdoin/observability": "workspace:*",
+    "@bowdoin/utils": "workspace:*",
+    "redis": "^4.6.13"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.13",
+    "eslint": "^9",
+    "prettier": "^3",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.9.2",
+    "vitest": "^2.1.2"
+  },
+  "publishConfig": {
+    "access": "restricted"
+  }
+}

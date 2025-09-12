@@ -1,0 +1,457 @@
+# Default values for the Bowdoin OpenTelemetry Collector chart.
+# These are safe, production-ready defaults that you can deploy as a central
+# OTEL “gateway” (Deployment) and scale horizontally via HPA. You can also
+# switch to “agent” mode (DaemonSet) if you prefer node-local collection.
+#
+# ⚠️ Never commit real credentials here. Use Kubernetes Secrets and reference
+# them via environment variables or secret mounts.
+
+global:
+  namespace: "observability"
+  labels: {}
+  annotations: {}
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: "0.93.0"
+  pullPolicy: IfNotPresent
+  # imagePullSecrets: [] # set at namespace level or here if needed
+
+mode: gateway         # gateway | agent
+replicaCount: 2       # used only when mode=gateway
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automount: false
+
+rbac:
+  create: true
+
+priorityClassName: ""   # e.g., "system-cluster-critical"
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8888"
+
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  fsGroupChangePolicy: "OnRootMismatch"
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ "ALL" ]
+
+resources:
+  requests:
+    cpu: "200m"
+    memory: "512Mi"
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+topologySpreadConstraints:
+  enabled: true
+  maxSkew: 1
+  whenUnsatisfiable: "ScheduleAnyway"
+  topologyKey: "topology.kubernetes.io/zone"
+
+service:
+  type: ClusterIP
+  annotations: {}
+  labels: {}
+  ports:
+    otlpGrpc: 4317
+    otlpHttp: 4318
+    metrics: 8888
+    zpages: 55679
+  otlpGrpcEnabled: true
+  otlpHttpEnabled: true
+  zpagesEnabled: false
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []   # e.g., [{ host: "otel.example.com", paths: [ { path: /, pathType: Prefix } ] }]
+  tls: []     # e.g., [{ hosts: ["otel.example.com"], secretName: "otel-tls" }]
+
+networkPolicy:
+  enabled: true
+  allowFromNamespaces:
+    - kube-system
+    - monitoring
+  # Additional CIDRs you want to allow to reach OTLP ports (for mesh or egress)
+  additionalIngressCidrs: []
+  # Egress destinations (Tempo/Loki/Prometheus remote_write/etc.)
+  allowEgressCidrs: []
+  allowDns: true
+
+serviceMonitor:
+  enabled: true
+  namespace: "monitoring"
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  annotations: {}
+  selector: {}
+  relabelings: []
+  metricRelabelings: []
+  # If your Prometheus needs TLS/auth, configure at the Prom stack; collector exposes plain metrics.
+
+# --------------------------
+# Backends / destinations
+# --------------------------
+backends:
+  tempo:
+    enabled: true
+    endpoint: "tempo.monitoring.svc.cluster.local:4317"
+    tls:
+      insecure: true         # set false for mTLS/TLS
+      caFile: ""             # mount via extraSecretMounts and reference here if needed
+      certFile: ""
+      keyFile: ""
+    headers: {}              # additional gRPC headers if required
+    compression: "on"
+
+  loki:
+    enabled: true
+    endpoint: "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+    tenantId: ""             # optional multi-tenant setups
+    labels:
+      job: "otel-collector"
+      # These are dynamic labels applied by processors; keep static ones here minimal.
+
+  prometheus:
+    exporter:
+      enabled: true          # expose /metrics on :8888 for Prometheus to scrape
+    remoteWrite:
+      enabled: false
+      endpoint: ""           # https://prom.example/api/v1/write
+      headers: {}            # e.g., { "X-Scope-OrgID": "bowdoin" }
+      basicAuth:
+        enabled: false
+        existingSecret: ""   # secret with keys: username, password
+        usernameKey: "username"
+        passwordKey: "password"
+      tls:
+        insecureSkipVerify: false
+        caFile: ""
+        certFile: ""
+        keyFile: ""
+
+  genericOtlp:
+    # Optional secondary OTLP exporter, e.g. to a vendor backend.
+    enabled: false
+    endpoint: ""             # host:port (gRPC) or http(s):// for OTLP/HTTP
+    protocol: "grpc"         # grpc | http
+    tls:
+      insecure: false
+    headers: {}
+    compression: "on"
+
+# --------------------------
+# Signal enablement
+# --------------------------
+signals:
+  traces:
+    enabled: true
+  metrics:
+    enabled: true
+  logs:
+    enabled: true
+
+# --------------------------
+# Collector configuration
+# If you need full control, set `collectorConfigOverride.enabled=true`
+# and provide your own OpenTelemetry config under `collectorConfigOverride.config`.
+# Otherwise, the templated default below is used.
+# --------------------------
+collectorConfigOverride:
+  enabled: false
+  config: |
+    receivers: {}
+    processors: {}
+    exporters: {}
+    service:
+      telemetry:
+        metrics:
+          address: ":8888"
+      pipelines: {}
+
+# The managed / default configuration is rendered from this values.yaml.
+# It’s opinionated for production: memory limits, batching, k8s attributes, and
+# per-signal pipelines with reasonable defaults.
+managedPipelines:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:{{ .Values.service.ports.otlpGrpc }}"
+        http:
+          endpoint: "0.0.0.0:{{ .Values.service.ports.otlpHttp }}"
+    # Example: scrape the collector’s own metrics (already exposed by serviceMonitor)
+    # prometheus:
+    #   config:
+    #     scrape_configs:
+    #       - job_name: 'self'
+    #         static_configs:
+    #           - targets: ['127.0.0.1:8888']
+
+  processors:
+    memory_limiter:
+      check_interval: 5s
+      # ~80% of pod memory limit for headroom; adjust if you change limits
+      limit_percentage: 80
+      spike_limit_percentage: 25
+    batch:
+      timeout: 5s
+      send_batch_size: 8192
+      send_batch_max_size: 10240
+    k8sattributes:
+      auth_type: serviceAccount
+      extract:
+        metadata:
+          - k8s.namespace.name
+          - k8s.pod.name
+          - k8s.deployment.name
+          - k8s.statefulset.name
+          - k8s.daemonset.name
+          - k8s.pod.uid
+      pod_association:
+        - from: resource_attribute
+          name: k8s.pod.uid
+        - from: connection
+    resource:
+      attributes:
+        - key: service.namespace
+          value: "bowdoin"
+          action: upsert
+
+  exporters:
+    # Tempo (traces)
+    otlp/tempo:
+      endpoint: "{{ .Values.backends.tempo.endpoint }}"
+      tls:
+        insecure: {{ .Values.backends.tempo.tls.insecure | default false }}
+        {{- if .Values.backends.tempo.tls.caFile }}
+        ca_file: "{{ .Values.backends.tempo.tls.caFile }}"
+        {{- end }}
+        {{- if and .Values.backends.tempo.tls.certFile .Values.backends.tempo.tls.keyFile }}
+        cert_file: "{{ .Values.backends.tempo.tls.certFile }}"
+        key_file: "{{ .Values.backends.tempo.tls.keyFile }}"
+        {{- end }}
+      headers:
+        {{- toYaml .Values.backends.tempo.headers | nindent 8 }}
+      compression: {{ .Values.backends.tempo.compression | default "on" }}
+
+    # Loki (logs)
+    loki:
+      endpoint: "{{ .Values.backends.loki.endpoint }}"
+      default_labels_enabled:
+        exporter: true
+        job: true
+        instance: false
+      labels:
+        {{- toYaml .Values.backends.loki.labels | nindent 8 }}
+      {{- if .Values.backends.loki.tenantId }}
+      tenant_id: "{{ .Values.backends.loki.tenantId }}"
+      {{- end }}
+
+    # Prometheus (metrics): either exporter for scrape OR remote_write
+    prometheus:
+      resource_to_telemetry_conversion:
+        enabled: true
+    {{- if .Values.backends.prometheus.remoteWrite.enabled }}
+    prometheusremotewrite:
+      endpoint: "{{ .Values.backends.prometheus.remoteWrite.endpoint }}"
+      headers:
+        {{- toYaml .Values.backends.prometheus.remoteWrite.headers | nindent 8 }}
+      {{- if .Values.backends.prometheus.remoteWrite.basicAuth.enabled }}
+      auth:
+        authenticator: basicauth/prom
+      {{- end }}
+      tls:
+        insecure_skip_verify: {{ .Values.backends.prometheus.remoteWrite.tls.insecureSkipVerify | default false }}
+        {{- if .Values.backends.prometheus.remoteWrite.tls.caFile }}
+        ca_file: "{{ .Values.backends.prometheus.remoteWrite.tls.caFile }}"
+        {{- end }}
+        {{- if and .Values.backends.prometheus.remoteWrite.tls.certFile .Values.backends.prometheus.remoteWrite.tls.keyFile }}
+        cert_file: "{{ .Values.backends.prometheus.remoteWrite.tls.certFile }}"
+        key_file: "{{ .Values.backends.prometheus.remoteWrite.tls.keyFile }}"
+        {{- end }}
+    {{- end }}
+
+    {{- if .Values.backends.genericOtlp.enabled }}
+    otlp/generic:
+      endpoint: "{{ .Values.backends.genericOtlp.endpoint }}"
+      {{- if eq .Values.backends.genericOtlp.protocol "http" }}
+      protocol:
+        http:
+          compression: {{ .Values.backends.genericOtlp.compression | default "on" }}
+          headers:
+            {{- toYaml .Values.backends.genericOtlp.headers | nindent 12 }}
+          tls:
+            insecure: {{ .Values.backends.genericOtlp.tls.insecure | default false }}
+      {{- else }}
+      tls:
+        insecure: {{ .Values.backends.genericOtlp.tls.insecure | default false }}
+      headers:
+        {{- toYaml .Values.backends.genericOtlp.headers | nindent 8 }}
+      compression: {{ .Values.backends.genericOtlp.compression | default "on" }}
+      {{- end }}
+    {{- end }}
+
+  extensions:
+    health_check: {}
+    pprof:
+      endpoint: "0.0.0.0:1777"
+    zpages:
+      endpoint: "0.0.0.0:{{ .Values.service.ports.zpages }}"
+
+  authenticators:
+    {{- if and .Values.backends.prometheus.remoteWrite.enabled .Values.backends.prometheus.remoteWrite.basicAuth.enabled }}
+    basicauth/prom:
+      client_auth:
+        username: ${PROM_REMOTE_WRITE_USERNAME}
+        password: ${PROM_REMOTE_WRITE_PASSWORD}
+    {{- end }}
+
+  service:
+    telemetry:
+      # The collector exposes its own metrics here; Prometheus scrapes this.
+      metrics:
+        address: ":{{ .Values.service.ports.metrics }}"
+    extensions:
+      - health_check
+      - pprof
+      {{- if .Values.service.zpagesEnabled }}- zpages{{- end }}
+      {{- if and .Values.backends.prometheus.remoteWrite.enabled .Values.backends.prometheus.remoteWrite.basicAuth.enabled }}- basicauth/prom{{- end }}
+
+    pipelines:
+      {{- if .Values.signals.traces.enabled }}
+      traces:
+        receivers: [ otlp ]
+        processors: [ memory_limiter, k8sattributes, resource, batch ]
+        exporters:
+          - otlp/tempo
+          {{- if .Values.backends.genericOtlp.enabled }}- otlp/generic{{- end }}
+      {{- end }}
+
+      {{- if .Values.signals.metrics.enabled }}
+      metrics:
+        receivers: [ otlp ]
+        processors: [ memory_limiter, k8sattributes, resource, batch ]
+        exporters:
+          - prometheus
+          {{- if .Values.backends.prometheus.remoteWrite.enabled }}- prometheusremotewrite{{- end }}
+          {{- if .Values.backends.genericOtlp.enabled }}- otlp/generic{{- end }}
+      {{- end }}
+
+      {{- if .Values.signals.logs.enabled }}
+      logs:
+        receivers: [ otlp ]
+        processors: [ memory_limiter, k8sattributes, resource, batch ]
+        exporters:
+          - loki
+          {{- if .Values.backends.genericOtlp.enabled }}- otlp/generic{{- end }}
+      {{- end }}
+
+# --------------------------
+# Environment / secrets
+# --------------------------
+env: []     # e.g., [{ name: OTEL_RESOURCE_ATTRIBUTES, value: service.namespace=bowdoin }]
+envFrom: [] # e.g., [{ secretRef: { name: "otel-extra" }}]
+
+# For mounting TLS CA/certs or vendor creds
+extraSecretMounts: []
+# - name: "tempo-ca"
+#   secretName: "tempo-ca"
+#   mountPath: "/etc/otel/tempo"
+#   readOnly: true
+
+extraConfigMaps: []
+volumeMounts:
+  extra: []
+volumes:
+  extra: []
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 13133
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: 13133
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+
+# --------------------------
+# TLS / server-side options
+# (If you terminate TLS at Ingress or Service Mesh, you may keep these off.)
+# --------------------------
+server:
+  tls:
+    otlpGrpc:
+      enabled: false
+      certFile: ""
+      keyFile: ""
+      clientCaFile: ""   # enable mTLS if set
+    otlpHttp:
+      enabled: false
+      certFile: ""
+      keyFile: ""
+      clientCaFile: ""
+
+# --------------------------
+# Debugging / developer toggles
+# --------------------------
+debug:
+  logLevel: "info"   # debug | info | warn | error
+  # Enable pprof & zpages in managedPipelines.extensions above

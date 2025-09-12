@@ -1,0 +1,32 @@
+{
+  "name": "@bowdoin/utils",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rimraf dist",
+    "lint": "eslint src --ext .ts,.tsx",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "prepublishOnly": "pnpm run build"
+  },
+  "dependencies": {
+    "date-fns": "^3.6.0",
+    "nanoid": "^5.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.13",
+    "eslint": "^9",
+    "prettier": "^3",
+    "typescript": "^5.9.2",
+    "vitest": "^1.6.1"
+  }
+}

@@ -1,0 +1,376 @@
+# infra/helm/charts/app/values.yaml
+#
+# Opinionated, production-ready defaults for the Bowdoin Marketplace web app.
+# Tune per environment via separate values files (e.g., values.prod.yaml).
+
+# -----------------------------------------------------------------------------
+# Global toggles & subcharts (wired in Chart.yaml)
+# -----------------------------------------------------------------------------
+postgres:
+  enabled: false   # Usually managed outside (Cloud SQL/RDS). Set true to use subchart.
+redis:
+  enabled: false   # Usually managed outside (ElastiCache/Memorystore).
+minio:
+  enabled: false   # Set true for in-cluster object storage; otherwise use S3/GCS.
+otelCollector:
+  enabled: false
+monitoring:
+  prometheusStack:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# Image & deployment
+# -----------------------------------------------------------------------------
+image:
+  repository: ghcr.io/your-org/bowdoin-marketplace/app
+  tag: ""                # empty => .Chart.AppVersion or overridden at deploy time (e.g., Git SHA)
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []     # e.g., [{ name: ghcr-creds }]
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 3
+
+# For canaries / staged rollouts
+podLabels: {}
+podAnnotations:
+  # Surface Git metadata in pods for traceability (set by CI during deploy)
+  bowdoin.marketplace/commit: "{{ .Values.git.commit | default \"unknown\" }}"
+  bowdoin.marketplace/version: "{{ .Chart.AppVersion }}"
+
+# If your CI injects these:
+git:
+  commit: ""
+  branch: ""
+
+# -----------------------------------------------------------------------------
+# Security contexts
+# -----------------------------------------------------------------------------
+podSecurityContext:
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  fsGroupChangePolicy: "OnRootMismatch"
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# -----------------------------------------------------------------------------
+# Service Account
+# -----------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""          # if empty, fullname is used
+  annotations: {}   # e.g., for IAM roles on EKS/GKE
+
+# -----------------------------------------------------------------------------
+# Service (ClusterIP for Ingress)
+# -----------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 3000
+  targetPort: 3000
+  annotations: {}
+  labels: {}
+
+# -----------------------------------------------------------------------------
+# Ingress
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    # Enable sticky sessions only if you cannot use stateless/session-store
+    # nginx.ingress.kubernetes.io/affinity: "cookie"
+    # nginx.ingress.kubernetes.io/session-cookie-name: "route"
+  hosts:
+    - host: app.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: app-tls
+      hosts:
+        - app.example.com
+
+# -----------------------------------------------------------------------------
+# Probes
+# -----------------------------------------------------------------------------
+probes:
+  liveness:
+    path: /api/healthz
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    path: /api/readyz
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 6
+  startup:
+    path: /api/healthz
+    failureThreshold: 30
+    periodSeconds: 5
+    timeoutSeconds: 2
+
+# -----------------------------------------------------------------------------
+# Resources (conservative defaults; tune per cluster)
+# -----------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: "250m"
+    memory: "512Mi"
+  limits:
+    cpu: "1000m"
+    memory: "1Gi"
+
+# -----------------------------------------------------------------------------
+# Autoscaling (HPA)
+# -----------------------------------------------------------------------------
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 15
+  targetCPUUtilizationPercentage: 60
+  targetMemoryUtilizationPercentage: 75
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 120
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+
+# -----------------------------------------------------------------------------
+# Pod Disruption Budget
+# -----------------------------------------------------------------------------
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# -----------------------------------------------------------------------------
+# Node scheduling
+# -----------------------------------------------------------------------------
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
+# -----------------------------------------------------------------------------
+# Volumes (for tmp/cache since root FS is read-only)
+# -----------------------------------------------------------------------------
+volumes:
+  - name: tmp
+    emptyDir: {}
+  - name: next-cache
+    emptyDir: {}
+volumeMounts:
+  - name: tmp
+    mountPath: /tmp
+  - name: next-cache
+    mountPath: /.next/cache
+
+# -----------------------------------------------------------------------------
+# Init containers (e.g., DB migrations)
+# -----------------------------------------------------------------------------
+initContainers:
+  migrate:
+    enabled: true
+    image:
+      repository: ghcr.io/your-org/bowdoin-marketplace/app
+      tag: ""     # typically same as .Values.image.tag
+      pullPolicy: IfNotPresent
+    command: ["/bin/sh", "-lc"]
+    args:
+      - |
+        echo "Running DB migrations…";
+        node --version;
+        pnpm --version || true;
+        node packages/db/dist/migrate.js
+    envFromSecretRefs:
+      - app-secrets
+    env:
+      - name: LOG_LEVEL
+        value: "info"
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "128Mi"
+      limits:
+        cpu: "250m"
+        memory: "256Mi"
+
+# -----------------------------------------------------------------------------
+# Environment
+# Prefer pulling sensitive values from Kubernetes Secrets.
+# -----------------------------------------------------------------------------
+env:
+  # Non-secret configuration (safe to be ConfigMap)
+  NODE_ENV: "production"
+  NEXT_SHARP_PATH: ""                 # leave default; can set if using musl variants
+  PORT: "3000"
+  HOSTNAME: "0.0.0.0"
+  LOG_LEVEL: "info"
+  ENABLE_OPENAPI: "true"
+  ENABLE_TELEMETRY: "true"
+  # Observability
+  OTEL_SERVICE_NAME: "web"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+  OTEL_TRACES_EXPORTER: "otlp"
+  OTEL_METRICS_EXPORTER: "otlp"
+  # Security hardening toggles for CSP/headers (handled in app code)
+  CSP_REPORT_ONLY: "false"
+
+# Reference Kubernetes Secret(s) that contain sensitive variables
+# The chart's templates will create EnvFrom on these names.
+secretRefs:
+  - app-secrets   # create this separately (sealed-secrets/external-secrets recommended)
+
+# Example of expected secret keys (for documentation only):
+#   DATABASE_URL: "postgresql://user:pass@postgres:5432/app?sslmode=prefer"
+#   REDIS_URL: "redis://:pass@redis:6379/0"
+#   NEXTAUTH_URL: "https://app.example.com"
+#   NEXTAUTH_SECRET: "base64-32bytes"
+#   EMAIL_FROM: "no-reply@example.com"
+#   SMTP_HOST: "email-smtp.us-east-1.amazonaws.com"
+#   SMTP_PORT: "587"
+#   SMTP_USER: "AKI..."
+#   SMTP_PASS: "xxx"
+#   STORAGE_DRIVER: "s3"          # or "minio"
+#   S3_ENDPOINT: "https://s3.amazonaws.com" # or "http://minio.minio:9000"
+#   S3_REGION: "us-east-1"
+#   S3_BUCKET: "bowdoin-marketplace"
+#   S3_ACCESS_KEY_ID: "xxx"
+#   S3_SECRET_ACCESS_KEY: "xxx"
+#   OKTA_ISSUER: "https://dev-xxxx.okta.com/oauth2/default"   # if used
+#   OKTA_CLIENT_ID: "xxx"
+#   OKTA_CLIENT_SECRET: "xxx"
+#   EMAIL_VERIFICATION_FROM: "community@college.edu"
+
+extraEnv: []     # e.g., [{ name: FEATURE_FLAG_X, value: "true" }]
+
+# -----------------------------------------------------------------------------
+# ConfigMap-style app config (mounted as env or files if needed)
+# -----------------------------------------------------------------------------
+config:
+  enabled: false
+  data: {}
+  # Example:
+  # data:
+  #   FEATURE_FLAGS: |
+  #     {"affiliationRequired": true, "uploadsEnabled": true}
+
+# -----------------------------------------------------------------------------
+# Sidecars (e.g., log shippers). Disabled by default.
+# -----------------------------------------------------------------------------
+sidecars: []
+# - name: vector
+#   image: timberio/vector:0.38.0-debian
+#   args: ["--config", "/etc/vector/vector.toml"]
+#   volumeMounts:
+#     - name: varlog
+#       mountPath: /var/log
+#   resources:
+#     requests: { cpu: 50m, memory: 64Mi }
+#     limits: { cpu: 200m, memory: 128Mi }
+
+# -----------------------------------------------------------------------------
+# ServiceMonitor (Prometheus Operator)
+# -----------------------------------------------------------------------------
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  annotations: {}
+  scheme: http
+  tlsConfig: {}
+  metricRelabelings: []
+  relabelings: []
+  path: /metrics
+  portName: http # will map to the Service port name in templates
+
+# -----------------------------------------------------------------------------
+# Network policy (optional)
+# -----------------------------------------------------------------------------
+networkPolicy:
+  enabled: false
+  ingress:
+    - from:
+        - podSelector: {}   # allow from same namespace by default
+      ports:
+        - port: 3000
+          protocol: TCP
+  egress:
+    # Allow to DNS, Postgres, Redis, OTEL, S3/Email endpoints etc.
+    - to: []
+      ports:
+        - port: 53
+          protocol: UDP
+
+# -----------------------------------------------------------------------------
+# Rollout strategy
+# -----------------------------------------------------------------------------
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 25%
+
+# -----------------------------------------------------------------------------
+# Container command/args (use defaults from image)
+# -----------------------------------------------------------------------------
+command: []
+args: []
+
+# -----------------------------------------------------------------------------
+# Ports
+# -----------------------------------------------------------------------------
+containerPorts:
+  - name: http
+    containerPort: 3000
+    protocol: TCP
+
+# -----------------------------------------------------------------------------
+# TLS (pod to pod, not Ingress TLS)
+# -----------------------------------------------------------------------------
+mtls:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# Extra Kubernetes objects (labels/annotations)
+# -----------------------------------------------------------------------------
+extraLabels: {}
+extraAnnotations: {}
+
+# -----------------------------------------------------------------------------
+# Template toggles
+# -----------------------------------------------------------------------------
+templates:
+  deployment: true
+  service: true
+  ingress: true
+  hpa: true
+  pdb: true
+  configmap: true
+  secret: false        # This chart does not create app-secrets by default; manage externally.
+  serviceMonitor: true

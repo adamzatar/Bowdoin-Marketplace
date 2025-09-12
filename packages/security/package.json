@@ -1,0 +1,76 @@
+{
+  "name": "@bowdoin/security",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Security utilities for Bowdoin Marketplace (CSP, CSRF helpers, hardened headers, rate limit presets).",
+  "keywords": [
+    "security",
+    "csp",
+    "csrf",
+    "headers",
+    "rate-limit",
+    "nextjs",
+    "node"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./csp": {
+      "types": "./dist/csp.d.ts",
+      "import": "./dist/csp.js",
+      "require": "./dist/csp.cjs"
+    },
+    "./csrf": {
+      "types": "./dist/csrf.d.ts",
+      "import": "./dist/csrf.js",
+      "require": "./dist/csrf.cjs"
+    },
+    "./headers": {
+      "types": "./dist/headers.d.ts",
+      "import": "./dist/headers.js",
+      "require": "./dist/headers.cjs"
+    },
+    "./rate-limits/community": {
+      "types": "./dist/rate-limits/community.d.ts",
+      "import": "./dist/rate-limits/community.js",
+      "require": "./dist/rate-limits/community.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@bowdoin/rate-limit": "workspace:*",
+    "@bowdoin/config": "workspace:*",
+    "@bowdoin/utils": "workspace:*",
+    "undici": "^7.15.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.13",
+    "eslint": "^9",
+    "prettier": "^3",
+    "rimraf": "^6.0.1",
+    "tsup": "^8.1.0",
+    "typescript": "^5.9.2"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsup src/index.ts src/csp.ts src/csrf.ts src/headers.ts src/rate-limits/community.ts --format esm,cjs --dts --sourcemap",
+    "clean": "rimraf dist",
+    "dev": "tsup src/index.ts src/csp.ts src/csrf.ts src/headers.ts src/rate-limits/community.ts --format esm,cjs --dts --sourcemap --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

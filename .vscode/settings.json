@@ -1,0 +1,5 @@
+{
+  "tailwindCSS.experimental.configFile": "apps/web/tailwind.config.cjs",
+  "tailwindCSS.includeLanguages": { "typescriptreact": "html", "javascriptreact": "html" },
+  "tailwindCSS.classAttributes": ["class", "className"]
+}

@@ -1,0 +1,58 @@
+# infra/helm/charts/app/templates/pdb.yaml
+{{- /*
+PodDisruptionBudget for the application.
+- Creates a PDB only when enabled and there will be >1 pods (either .Values.replicas or HPA minReplicas)
+- Defaults:
+    * With HPA enabled  -> maxUnavailable: 25%
+    * Without HPA       -> minAvailable: 1
+- You can override via .Values.pdb.minAvailable or .Values.pdb.maxUnavailable
+*/ -}}
+{{- if .Values.pdb.enabled }}
+
+{{- /* Determine how many pods at minimum we expect */ -}}
+{{- $minPods := (int (default 2 .Values.replicas)) -}}
+{{- if .Values.autoscaling.enabled -}}
+{{- $minPods = (int (default 2 .Values.autoscaling.minReplicas)) -}}
+{{- end -}}
+
+{{- if gt $minPods 1 -}}
+{{- $appName := default .Chart.Name .Values.app.name -}}
+{{- $labels := dict
+      "app.kubernetes.io/name" .Chart.Name
+      "app.kubernetes.io/instance" .Release.Name
+      "app.kubernetes.io/part-of" "bowdoin-marketplace"
+      "app.kubernetes.io/component" (default "web" .Values.app.component)
+-}}
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ printf "%s-pdb" ($appName | trunc 58 | trimSuffix "-") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- toYaml $labels | nindent 4 }}
+    {{- with .Values.pdb.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    {{- with .Values.pdb.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: {{ default "web" .Values.app.component | quote }}
+  {{- /* If user set an explicit value, use it. Else smart defaults depending on HPA */}}
+  {{- if hasKey .Values.pdb "minAvailable" }}
+  minAvailable: {{ .Values.pdb.minAvailable | quote }}
+  {{- else if hasKey .Values.pdb "maxUnavailable" }}
+  maxUnavailable: {{ .Values.pdb.maxUnavailable | quote }}
+  {{- else if .Values.autoscaling.enabled }}
+  maxUnavailable: {{ default "25%" .Values.pdb.defaultMaxUnavailable | quote }}
+  {{- else }}
+  minAvailable: {{ default "1" .Values.pdb.defaultMinAvailable | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

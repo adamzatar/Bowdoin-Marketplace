@@ -1,0 +1,25 @@
+bowdoin-marketplace@0.1.0 /Users/azaatar/bowdoin-marketplace (PRIVATE)
+
+@bowdoin/web@0.0.0 /Users/azaatar/bowdoin-marketplace/apps/web (PRIVATE)
+
+@bowdoin/auth@0.1.0 /Users/azaatar/bowdoin-marketplace/packages/auth (PRIVATE)
+
+@bowdoin/config@0.1.0 /Users/azaatar/bowdoin-marketplace/packages/config (PRIVATE)
+
+@bowdoin/contracts@0.1.0 /Users/azaatar/bowdoin-marketplace/packages/contracts (PRIVATE)
+
+@bowdoin/db@0.0.0 /Users/azaatar/bowdoin-marketplace/packages/db (PRIVATE)
+
+@bowdoin/email@0.0.0 /Users/azaatar/bowdoin-marketplace/packages/email (PRIVATE)
+
+@bowdoin/observability@0.0.0 /Users/azaatar/bowdoin-marketplace/packages/observability (PRIVATE)
+
+@bowdoin/queue@0.0.0 /Users/azaatar/bowdoin-marketplace/packages/queue (PRIVATE)
+
+@bowdoin/rate-limit@0.0.0 /Users/azaatar/bowdoin-marketplace/packages/rate-limit (PRIVATE)
+
+@bowdoin/security@0.1.0 /Users/azaatar/bowdoin-marketplace/packages/security (PRIVATE)
+
+@bowdoin/storage@0.1.0 /Users/azaatar/bowdoin-marketplace/packages/storage (PRIVATE)
+
+@bowdoin/utils@0.0.0 /Users/azaatar/bowdoin-marketplace/packages/utils (PRIVATE)

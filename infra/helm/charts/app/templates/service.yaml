@@ -1,0 +1,165 @@
+# infra/helm/charts/app/templates/service.yaml
+{{- /*
+A production-ready Service with sane defaults and knobs:
+- Primary ClusterIP Service (or LoadBalancer/NodePort if configured)
+- Optional headless Service for stable DNS and readiness-gated discovery
+- Optional metrics port and Prometheus scrape annotations
+- Session affinity, topology hints, externalTrafficPolicy, source ranges
+*/ -}}
+
+{{- $appName := default .Chart.Name .Values.app.name -}}
+{{- $svcName := default $appName .Values.service.name -}}
+{{- $labels := dict
+      "app.kubernetes.io/name" .Chart.Name
+      "app.kubernetes.io/instance" .Release.Name
+      "app.kubernetes.io/part-of" "bowdoin-marketplace"
+      "app.kubernetes.io/component" (default "web" .Values.app.component)
+-}}
+
+{{/* ------------------------ Primary Service ------------------------ */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svcName | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- toYaml $labels | nindent 4 }}
+    {{- with .Values.service.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    {{- /* If metrics.enabled & metrics.annotations != false, add common scrape hints (overridable) */}}
+    {{- if and (.Values.metrics.enabled) (ne (default true .Values.metrics.annotations) false) }}
+    prometheus.io/scrape: "true"
+    prometheus.io/port: {{ default "9464" .Values.metrics.port | quote }}
+    prometheus.io/path: {{ default "/metrics" .Values.metrics.path | quote }}
+    {{- end }}
+    {{- with .Values.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: {{ default "ClusterIP" .Values.service.type }}
+  {{- if .Values.service.clusterIP }}
+  clusterIP: {{ .Values.service.clusterIP | quote }}
+  {{- end }}
+  {{- if .Values.service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
+  {{- if .Values.service.ipFamilies }}
+  ipFamilies:
+    {{- toYaml .Values.service.ipFamilies | nindent 4 }}
+  {{- end }}
+  {{- if .Values.service.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ .Values.service.ipFamilyPolicy }}
+  {{- end }}
+  {{- if and (eq (default "ClusterIP" .Values.service.type) "LoadBalancer") .Values.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml .Values.service.loadBalancerSourceRanges | nindent 4 }}
+  {{- end }}
+  {{- if .Values.service.loadBalancerIP }}
+  loadBalancerIP: {{ .Values.service.loadBalancerIP | quote }}
+  {{- end }}
+  {{- if .Values.service.sessionAffinity }}
+  sessionAffinity: {{ .Values.service.sessionAffinity }}
+  {{- if and (eq .Values.service.sessionAffinity "ClientIP") .Values.service.sessionAffinityConfig }}
+  sessionAffinityConfig:
+    {{- toYaml .Values.service.sessionAffinityConfig | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  {{- if .Values.service.trafficDistribution }}
+  internalTrafficPolicy: {{ .Values.service.trafficDistribution.internal | default "Cluster" }}
+  {{- if .Values.service.trafficDistribution.external }}
+  externalTrafficPolicy: {{ .Values.service.trafficDistribution.external }}
+  {{- end }}
+  {{- end }}
+  {{- if .Values.service.topologyKeys }}
+  topologyKeys:
+    {{- toYaml .Values.service.topologyKeys | nindent 4 }}
+  {{- end }}
+  publishNotReadyAddresses: {{ default false .Values.service.publishNotReadyAddresses }}
+  ports:
+    # App HTTP port (named for Ingress)
+    - name: {{ default "http" .Values.service.portName }}
+      port: {{ default 80 .Values.service.port }}
+      targetPort: {{ default "http" .Values.service.targetPort }}
+      protocol: TCP
+    {{- if .Values.metrics.enabled }}
+    - name: {{ default "metrics" .Values.metrics.portName }}
+      port: {{ default 9464 .Values.metrics.port }}
+      targetPort: {{ default "metrics" .Values.metrics.targetPort }}
+      protocol: TCP
+    {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+
+{{- /* ------------------------ Optional Headless Service ------------------------ */}}
+{{- if .Values.service.headless.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-headless" $svcName | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- toYaml $labels | nindent 4 }}
+    {{- with .Values.service.headless.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    {{- with .Values.service.headless.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: {{ default false .Values.service.headless.publishNotReadyAddresses }}
+  ports:
+    - name: {{ default "http" .Values.service.portName }}
+      port: {{ default 80 .Values.service.port }}
+      targetPort: {{ default "http" .Values.service.targetPort }}
+      protocol: TCP
+    {{- if .Values.metrics.enabled }}
+    - name: {{ default "metrics" .Values.metrics.portName }}
+      port: {{ default 9464 .Values.metrics.port }}
+      targetPort: {{ default "metrics" .Values.metrics.targetPort }}
+      protocol: TCP
+    {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+
+service:
+  name: ""                  # defaults to app/chart name
+  type: ClusterIP           # or LoadBalancer | NodePort
+  portName: http
+  port: 80
+  targetPort: http          # matches containerPort name from Deployment
+  annotations: {}
+  labels: {}
+  clusterIP: null
+  loadBalancerIP: null
+  loadBalancerSourceRanges: []  # restrict LB to campus CIDRs if desired
+  externalTrafficPolicy: Cluster
+  sessionAffinity: None          # or ClientIP
+  sessionAffinityConfig:         # when ClientIP
+    clientIP:
+      timeoutSeconds: 10800
+  publishNotReadyAddresses: false
+  ipFamilies: []                 # e.g., ["IPv4","IPv6"]
+  ipFamilyPolicy: SingleStack    # or PreferDualStack / RequireDualStack
+  topologyKeys: []               # deprecated in k8s >=1.27; keep empty unless needed
+  headless:
+    enabled: false
+    publishNotReadyAddresses: false
+    annotations: {}
+    labels: {}
+
+metrics:
+  enabled: true
+  annotations: true           # set false to suppress prometheus.io/* hints
+  portName: metrics
+  port: 9464
+  targetPort: metrics
+  path: /metrics

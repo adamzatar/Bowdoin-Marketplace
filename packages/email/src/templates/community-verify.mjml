@@ -1,0 +1,107 @@
+<!-- packages/email/src/templates/community-verify.mjml -->
+<mjml>
+  <mj-head>
+    <mj-title>{{APP_NAME}} — Verify your email</mj-title>
+    <mj-preview>Verify your email to finish setting up {{APP_NAME}}.</mj-preview>
+
+    <mj-attributes>
+      <mj-all font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Inter, Oxygen, Ubuntu, Cantarell, 'Fira Sans', 'Droid Sans', 'Helvetica Neue', Arial, sans-serif" />
+      <mj-text color="#111827" font-size="16px" line-height="1.6" />
+      <mj-button background-color="#2563EB" color="#FFFFFF" inner-padding="14px 22px" border-radius="10px" font-size="16px" font-weight="600" />
+      <mj-section padding="0px" />
+      <mj-column padding="0px" />
+    </mj-attributes>
+
+    <!-- Dark mode polish -->
+    <mj-style inline="inline">
+      @media (prefers-color-scheme: dark) {
+        .dark-bg { background-color: #0B1220 !important; }
+        .card { background-color: #0F172A !important; border-color: #1F2937 !important; }
+        .muted { color: #9CA3AF !important; }
+        .text { color: #E5E7EB !important; }
+        a { color: #93C5FD !important; }
+      }
+      .code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; background:#F3F4F6; padding:2px 6px; border-radius:4px; }
+    </mj-style>
+  </mj-head>
+
+  <mj-body css-class="dark-bg" background-color="#F3F4F6">
+    <!-- Header / Brand -->
+    <mj-section padding="24px 0 0 0">
+      <mj-column>
+        <mj-text align="center" css-class="muted" font-size="14px">
+          <strong>{{APP_NAME}}</strong>
+        </mj-text>
+      </mj-column>
+    </mj-section>
+
+    <!-- Card -->
+    <mj-section padding="24px 16px">
+      <mj-column css-class="card" background-color="#FFFFFF" border="1px solid #E5E7EB" border-radius="12px" padding="24px">
+        <mj-text font-size="20px" font-weight="700" padding-bottom="8px" css-class="text">
+          Verify your email
+        </mj-text>
+
+        <mj-text css-class="text">
+          Hello, <span class="code">{{RECIPIENT}}</span>.
+          Click the button below to confirm your email and start using <strong>{{APP_NAME}}</strong>.
+        </mj-text>
+
+        <mj-spacer height="8px" />
+
+        <mj-text css-class="muted" font-size="14px">
+          Affiliation: <span class="code">{{AFFILIATION}}</span>.
+          If this shows <em>community</em>, you are signing up as a Brunswick resident (not Bowdoin-affiliated).
+          Bowdoin students will see a small “community” badge next to your name for extra awareness.
+        </mj-text>
+
+        <mj-spacer height="16px" />
+
+        <mj-button href="{{CTA_URL}}" rel="noopener noreferrer" title="Verify email address">
+          Verify email
+        </mj-button>
+
+        <mj-spacer height="12px" />
+
+        <mj-text css-class="muted" font-size="14px">
+          This link expires soon to protect your account. If it expires, start verification again from the app.
+        </mj-text>
+
+        <mj-divider border-color="#E5E7EB" padding="18px 0 12px 0" />
+
+        <mj-text css-class="muted" font-size="14px">
+          Can’t use the button? Copy and paste this link into your browser:
+          <br />
+          <span class="code">{{CTA_URL}}</span>
+        </mj-text>
+
+        <mj-spacer height="12px" />
+
+        <mj-text css-class="muted" font-size="13px">
+          Security tips:
+          <ul style="padding-left:18px; margin:8px 0;">
+            <li>Never share verification links or codes.</li>
+            <li>Only continue if you initiated this request.</li>
+            <li>Report suspicious activity to <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a>.</li>
+          </ul>
+        </mj-text>
+
+        <mj-divider border-color="#E5E7EB" padding="12px 0" />
+
+        <mj-text css-class="muted" font-size="12px">
+          You received this email because someone used <span class="code">{{RECIPIENT}}</span> to sign up for {{APP_NAME}}.
+          If this wasn’t you, you can safely ignore this message.
+        </mj-text>
+      </mj-column>
+    </mj-section>
+
+    <!-- Footer -->
+    <mj-section padding="0 16px 24px 16px">
+      <mj-column>
+        <mj-text align="center" css-class="muted" font-size="12px">
+          Need help? Contact <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a>
+        </mj-text>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>

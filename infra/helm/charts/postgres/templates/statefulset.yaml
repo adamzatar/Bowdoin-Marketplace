@@ -1,0 +1,362 @@
+# infra/helm/charts/postgres/templates/statefulset.yaml
+#
+# Hardened PostgreSQL primary StatefulSet (single-writer) with:
+# - Strict securityContext
+# - Configurable persistence (PVC or existingClaim)
+# - Optional TLS mount
+# - Optional Prometheus exporter sidecar
+# - Probes/resources/affinity/tolerations
+#
+# This template consumes keys from values.yaml under:
+#   postgresql.image.*
+#   postgresql.auth.*
+#   postgresql.primary.*
+#   monitoring.exporter.*
+#
+# NOTE: This template deploys a single primary. If you need replicas,
+#       deploy a separate template for readReplicas or use a specialized operator.
+
+{{- $fullname := ternary .Values.fullnameOverride (printf "%s-postgres" .Release.Name) (hasKey .Values "fullnameOverride" | and (ne .Values.fullnameOverride "")) -}}
+{{- $ns := default .Release.Namespace .Values.namespaceOverride -}}
+{{- $labels := dict "app.kubernetes.io/name" "postgres" "app.kubernetes.io/instance" .Release.Name "app.kubernetes.io/managed-by" "Helm" "app.kubernetes.io/part-of" "bowdoin-marketplace" -}}
+{{- $img := .Values.postgresql.image -}}
+{{- $auth := .Values.postgresql.auth -}}
+{{- $pri := .Values.postgresql.primary -}}
+{{- $tls := $pri.tls -}}
+{{- $exporter := .Values.monitoring.exporter -}}
+{{- $hasPVC := and ($pri.persistence.enabled) (eq (default "" $pri.persistence.existingClaim) "") -}}
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ $ns }}
+  labels:
+    {{- range $k, $v := $labels }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+  annotations:
+    # Keep only the latest two revisions to avoid clutter
+    statefulset.kubernetes.io/revision-history-limit: "2"
+spec:
+  serviceName: {{ $fullname }}-headless
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: "postgres"
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+  template:
+    metadata:
+      labels:
+        {{- range $k, $v := $labels }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+      annotations:
+        # Restart on secret change (admin/app user/TLS)
+        checksum/credentials: {{ (include "postgres.credentialsChecksum" .) | quote }}
+        {{- if $tls.enabled }}
+        checksum/tls: {{ (include "postgres.tlsChecksum" .) | quote }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "postgres.serviceAccountName" . | default "default" }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      enableServiceLinks: false
+      securityContext:
+        {{- if $pri.podSecurityContext.enabled }}
+        fsGroup: {{ $pri.podSecurityContext.fsGroup | default 1001 }}
+        runAsUser: {{ $pri.podSecurityContext.runAsUser | default 1001 }}
+        runAsGroup: {{ $pri.podSecurityContext.runAsGroup | default 1001 }}
+        runAsNonRoot: {{ $pri.podSecurityContext.runAsNonRoot | default true }}
+        seccompProfile:
+          type: {{ default "RuntimeDefault" (get $pri.podSecurityContext "seccompProfile" | default (dict "type" "RuntimeDefault")).type }}
+        {{- end }}
+      {{- with $pri.affinity }}
+      affinity: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $pri.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $pri.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        # If using an existing PVC, mount it via a named volume below
+        {{- if and $pri.persistence.enabled (ne (default "" $pri.persistence.existingClaim) "") }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $pri.persistence.existingClaim }}
+        {{- end }}
+        {{- if $tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ $tls.certificatesSecret | required "postgresql.primary.tls.certificatesSecret is required when TLS is enabled" }}
+            optional: false
+        {{- end }}
+        {{- if $pri.extraVolumes }}
+        {{- toYaml $pri.extraVolumes | nindent 8 }}
+        {{- end }}
+      initContainers:
+        # Ensure DB directory exists & permissions are correct on some storage classes
+        {{- if $pri.initContainers }}
+        {{- toYaml $pri.initContainers | nindent 8 }}
+        {{- end }}
+      containers:
+        - name: postgres
+          image: "{{ $img.registry }}/{{ $img.repository }}:{{ $img.tag }}"
+          imagePullPolicy: {{ $img.pullPolicy | default "IfNotPresent" }}
+          {{- if $pri.containerSecurityContext.enabled }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          {{- end }}
+          ports:
+            - name: tcp-postgres
+              containerPort: {{ $pri.service.ports.postgresql | default 5432 }}
+              protocol: TCP
+          env:
+            # Superuser (postgres) credentials
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $auth.existingSecret | required "postgresql.auth.existingSecret is required" }}
+                  key: {{ $auth.secretKeys.adminPasswordKey | default "postgres-password" }}
+            # Optional: set default DB/user on first init
+            - name: POSTGRES_DB
+              value: {{ $auth.database | default "appdb" | quote }}
+            - name: POSTGRES_USER
+              value: "postgres"
+            # Hardening: place PGDATA on mounted volume subdir
+            - name: PGDATA
+              value: "/var/lib/postgresql/data/pgdata"
+            {{- if $tls.enabled }}
+            - name: SSL_CERT_FILE
+              value: "/etc/postgres/tls/{{ $tls.certFilename | default "server.crt" }}"
+            - name: SSL_KEY_FILE
+              value: "/etc/postgres/tls/{{ $tls.certKeyFilename | default "server.key" }}"
+            - name: SSL_CA_FILE
+              value: "/etc/postgres/tls/{{ $tls.certCAFilename | default "ca.crt" }}"
+            {{- end }}
+            {{- if $pri.extraEnvVars }}
+            {{- toYaml $pri.extraEnvVars | nindent 12 }}
+            {{- end }}
+            {{- if $pri.extraEnvVarsSecret }}
+            - name: POSTGRES_EXTRA_ENV_FROM_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $pri.extraEnvVarsSecret }}
+                  key: dummy  # presence-only; prefer envFrom below
+            {{- end }}
+          {{- if $pri.extraEnvVarsSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ $pri.extraEnvVarsSecret }}
+          {{- end }}
+          args:
+            # Optionally enable SSL via -c flags if tls.enabled
+            {{- if $tls.enabled }}
+            - "-c"
+            - "ssl=on"
+            - "-c"
+            - "ssl_cert_file=/etc/postgres/tls/{{ $tls.certFilename | default "server.crt" }}"
+            - "-c"
+            - "ssl_key_file=/etc/postgres/tls/{{ $tls.certKeyFilename | default "server.key" }}"
+            {{- if $tls.certCAFilename }}
+            - "-c"
+            - "ssl_ca_file=/etc/postgres/tls/{{ $tls.certCAFilename }}"
+            {{- end }}
+            {{- end }}
+            {{- if $pri.extendedConfiguration }}
+            - "-c"
+            - {{ $pri.extendedConfiguration | quote | replace "\n" " " }}
+            {{- end }}
+          {{- with $pri.resources }}
+          resources: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            {{- if $tls.enabled }}
+            - name: tls
+              mountPath: /etc/postgres/tls
+              readOnly: true
+            {{- end }}
+            {{- if $pri.extraVolumeMounts }}
+            {{- toYaml $pri.extraVolumeMounts | nindent 12 }}
+            {{- end }}
+          {{- with $pri.startupProbe }}
+          startupProbe:
+            {{- if .enabled }}
+            tcpSocket:
+              port: tcp-postgres
+            initialDelaySeconds: {{ .initialDelaySeconds | default 10 }}
+            periodSeconds: {{ .periodSeconds | default 10 }}
+            timeoutSeconds: {{ .timeoutSeconds | default 5 }}
+            failureThreshold: {{ .failureThreshold | default 30 }}
+            successThreshold: {{ .successThreshold | default 1 }}
+            {{- end }}
+          {{- end }}
+          {{- with $pri.livenessProbe }}
+          livenessProbe:
+            {{- if .enabled }}
+            exec:
+              command: ["sh","-c","PGCONNECT_TIMEOUT=3 psql -U postgres -d {{ $auth.database | default "appdb" }} -c 'SELECT 1' >/dev/null"]
+            initialDelaySeconds: {{ .initialDelaySeconds | default 30 }}
+            periodSeconds: {{ .periodSeconds | default 10 }}
+            timeoutSeconds: {{ .timeoutSeconds | default 5 }}
+            failureThreshold: {{ .failureThreshold | default 6 }}
+            successThreshold: {{ .successThreshold | default 1 }}
+            {{- end }}
+          {{- end }}
+          {{- with $pri.readinessProbe }}
+          readinessProbe:
+            {{- if .enabled }}
+            exec:
+              command: ["sh","-c","PGCONNECT_TIMEOUT=3 psql -U postgres -d {{ $auth.database | default "appdb" }} -c 'SELECT 1' >/dev/null"]
+            initialDelaySeconds: {{ .initialDelaySeconds | default 5 }}
+            periodSeconds: {{ .periodSeconds | default 5 }}
+            timeoutSeconds: {{ .timeoutSeconds | default 3 }}
+            failureThreshold: {{ .failureThreshold | default 6 }}
+            successThreshold: {{ .successThreshold | default 1 }}
+            {{- end }}
+          {{- end }}
+
+        {{- if $exporter.enabled }}
+        - name: postgres-exporter
+          image: "prom/prometheus-postgres-exporter:v0.15.0"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--web.listen-address=:9187"
+          env:
+            {{- if $exporter.existingSecretName }}
+            - name: DATA_SOURCE_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $exporter.existingSecretName }}
+                  key: POSTGRES_EXPORTER_DSN
+                  optional: true
+            - name: DATA_SOURCE_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $exporter.existingSecretName }}
+                  key: DATA_SOURCE_URI
+                  optional: true
+            - name: DATA_SOURCE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $exporter.existingSecretName }}
+                  key: DATA_SOURCE_USER
+            - name: DATA_SOURCE_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $exporter.existingSecretName }}
+                  key: DATA_SOURCE_PASS
+            {{- else }}
+            - name: DATA_SOURCE_URI
+              value: {{ $exporter.env.dataSourceUri | default (printf "%s-headless.%s.svc.cluster.local:%d/%s?sslmode=disable" $fullname $ns ($pri.service.ports.postgresql | default 5432) ($auth.database | default "appdb")) | quote }}
+            - name: DATA_SOURCE_USER
+              value: {{ $exporter.env.user | default "postgres" | quote }}
+            - name: DATA_SOURCE_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $auth.existingSecret | required "postgresql.auth.existingSecret is required" }}
+                  key: {{ $auth.secretKeys.adminPasswordKey | default "postgres-password" }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: 9187
+          resources:
+            {{- toYaml ($exporter.resources | default dict) | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+        {{- end }}
+
+        {{- if $pri.sidecars }}
+        {{- toYaml $pri.sidecars | nindent 8 }}
+        {{- end }}
+
+      {{- if and $pri.persistence.enabled (eq (default "" $pri.persistence.existingClaim) "") }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        annotations:
+          {{- with $pri.persistence.annotations }}
+          {{- toYaml . | nindent 10 }}
+          {{- end }}
+        labels:
+          {{- range $k, $v := $labels }}
+          {{ $k }}: {{ $v | quote }}
+          {{- end }}
+      spec:
+        accessModes:
+          {{- if $pri.persistence.accessModes }}
+          {{- toYaml $pri.persistence.accessModes | nindent 10 }}
+          {{- else }}
+          - ReadWriteOnce
+          {{- end }}
+        resources:
+          requests:
+            storage: {{ $pri.persistence.size | default "100Gi" }}
+        {{- if $pri.persistence.storageClass }}
+        storageClassName: {{ $pri.persistence.storageClass | quote }}
+        {{- end }}
+        {{- with $pri.persistence.selector }}
+        selector: {{ toYaml . | nindent 10 }}
+        {{- end }}
+      {{- end }}
+
+---
+# Headless Service for stable network identity
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-headless
+  namespace: {{ $ns }}
+  labels:
+    {{- range $k, $v := $labels }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: "postgres"
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+  ports:
+    - name: tcp-postgres
+      port: {{ $pri.service.ports.postgresql | default 5432 }}
+      targetPort: tcp-postgres
+      protocol: TCP
+
+{{/*
+Helpers to compute config change checksums using relevant secrets.
+Assumes the secrets exist at install/upgrade time.
+*/}}
+{{- define "postgres.credentialsChecksum" -}}
+{{- $s := (lookup "v1" "Secret" (default $.Release.Namespace $.Values.namespaceOverride) $.Values.postgresql.auth.existingSecret) -}}
+{{- if $s -}}
+{{- toYaml $s.data | sha256sum -}}
+{{- else -}}missing{{- end -}}
+{{- end -}}
+
+{{- define "postgres.tlsChecksum" -}}
+{{- if not $.Values.postgresql.primary.tls.enabled -}}notls{{- else -}}
+{{- $secName := $.Values.postgresql.primary.tls.certificatesSecret -}}
+{{- $s := (lookup "v1" "Secret" (default $.Release.Namespace $.Values.namespaceOverride) $secName) -}}
+{{- if $s -}}
+{{- toYaml $s.data | sha256sum -}}
+{{- else -}}missing{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "postgres.serviceAccountName" -}}
+{{- if and (hasKey $.Values "serviceAccount") ($.Values.serviceAccount.create) -}}
+{{- if $.Values.serviceAccount.name -}}{{ $.Values.serviceAccount.name }}{{- else -}}{{ printf "%s-postgres" $.Release.Name }}{{- end -}}
+{{- else -}}default{{- end -}}
+{{- end -}}

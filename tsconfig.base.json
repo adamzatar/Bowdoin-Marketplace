@@ -1,0 +1,80 @@
+{
+  "compilerOptions": {
+    /* Language & Module system */
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+
+    /* Type checking (strict & safe) */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "useUnknownInCatchVariables": true,
+    "skipLibCheck": true,
+
+    /* JSX is configured per-project (Next.js app sets jsx: preserve) */
+    "checkJs": false,
+
+    /* Emission (packages may override to emit CJS/ESM, d.ts, etc.) */
+    "noEmit": true,
+
+    /* Base URL & Aliases */
+    "baseUrl": ".",
+    "paths": {
+      
+      "@auth": ["packages/auth/src/index.ts"],
+      "@auth/*": ["packages/auth/src/*"],
+      "@bowdoin/observability": ["packages/observability/src/index.ts"],
+      "@bowdoin/observability/*": ["packages/observability/src/*"],
+      "@config": ["packages/config/src/index.ts"],
+      "@config/*": ["packages/config/src/*"],
+      "@contracts": ["packages/contracts/src/index.ts"],
+      "@contracts/*": ["packages/contracts/src/*"],
+      "@db": ["packages/db/src/index.ts"],
+      "@db/*": ["packages/db/src/*"],
+      "@observability": ["packages/observability/src/index.ts"],
+      "@observability/*": ["packages/observability/src/*"],
+      "@queue": ["packages/queue/src/index.ts"],
+      "@queue/*": ["packages/queue/src/*"],
+      "@rate-limit": ["packages/rate-limit/src/index.ts"],
+      "@rate-limit/*": ["packages/rate-limit/src/*"],
+      "@security": ["packages/security/src/index.ts"],
+      "@security/*": ["packages/security/src/*"],
+      "@storage": ["packages/storage/src/index.ts"],
+      "@storage/*": ["packages/storage/src/*"],
+      "@utils": ["packages/utils/src/index.ts"],
+      "@utils/*": ["packages/utils/src/*"],
+      "@email": ["packages/email/src/index.ts"],
+      "@email/*": ["packages/email/src/*"],
+      
+
+      /* Frontend app alias (used by server route handlers and RSC code) */
+      "@/*": ["apps/web/src/*"]
+
+    },
+
+    /* Types */
+    "types": ["node"],
+
+    /* Incremental build info (packages that emit can override/composite) */
+    "tsBuildInfoFile": ".tsbuildinfo"
+  },
+  "include": [
+    "apps/**/*.ts",
+    "apps/**/*.tsx",
+    "packages/**/*.ts",
+    "packages/**/*.tsx",
+    "scripts/**/*.ts",
+    "infra/**/*.ts",
+    "*.ts"
+  ],
+  "exclude": ["node_modules", "dist", ".next", "coverage", "**/.turbo", "**/.cache"]
+}

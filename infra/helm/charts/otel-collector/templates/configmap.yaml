@@ -1,0 +1,344 @@
+{{- /*
+OpenTelemetry Collector — ConfigMap
+This renders the collector’s configuration. You can either:
+  1) Provide a full raw config via `.Values.config.raw` (it will be templated with `tpl`), OR
+  2) Use the managed defaults below, customized via values:
+       receivers.*, processors.*, exporters.*, extensions.*, pipelines.*, k8sAttributes.*, etc.
+
+Common values (see values.yaml):
+  config:
+    raw: |-
+      # (optional) full collector config — if set, overrides everything below
+    extra: {}            # (optional) object merged into the generated config (e.g. to inject custom pieces)
+
+  receivers:
+    otlp:
+      grpcEndpoint: "0.0.0.0:4317"
+      httpEndpoint: "0.0.0.0:4318"
+    hostmetrics:
+      enabled: true
+      collectionInterval: "60s"
+      scrapers:
+        cpu: {}
+        load: {}
+        memory: {}
+        disk: {}
+        filesystem: {}
+        network: {}
+        paging: {}
+        processes: {}
+    prometheus:
+      enabled: false
+      config: {}         # native prometheus receiver config (jobs/targets) if you want it
+
+  k8sAttributes:
+    enabled: true
+    filterByNamespace: true
+    extract:
+      - "k8s.namespace.name"
+      - "k8s.pod.name"
+      - "k8s.pod.uid"
+      - "k8s.container.name"
+      - "k8s.node.name"
+    podAssociations:
+      - from: resource_attribute
+        name: k8s.pod.uid
+      - from: resource_attribute
+        name: k8s.pod.ip
+      - from: connection
+    labels:
+      - key: "app.kubernetes.io/name"
+      - key: "app.kubernetes.io/instance"
+      - key: "app.kubernetes.io/component"
+
+  resource:
+    attributes:
+      service.namespace: "{{ .Release.Namespace }}"
+      deployment.environment: "{{ .Values.env | default .Values.global.environment | default "prod" }}"
+
+  processors:
+    memoryLimiter:
+      checkInterval: "5s"
+      limitPercentage: 75
+      spikeLimitPercentage: 15
+    batch:
+      sendBatchSize: 8192
+      timeout: "200ms"
+    tailSampling:
+      enabled: false
+      config: {}         # tail_sampling processor config if you enable it
+    transform:
+      enabled: false
+      config: {}         # transform processor config
+
+  exporters:
+    otlp:
+      enabled: true
+      endpoint: "tempo-distributor.monitoring.svc.cluster.local:4317"
+      protocol: "grpc"             # grpc|http
+      insecure: false
+      headers: {}
+      compression: "gzip"
+      timeout: "10s"
+      sendingQueue:
+        enabled: true
+        numConsumers: 10
+        queueSize: 10000
+      retryOnFailure:
+        enabled: true
+        initialInterval: "1s"
+        maxInterval: "30s"
+        maxElapsedTime: "300s"
+    prometheus:
+      enabled: true
+      endpoint: "0.0.0.0:8888"     # matches the Service port for scraping
+      constLabels: {}
+    prometheusremotewrite:
+      enabled: false
+      endpoint: ""                 # e.g. http://prometheus-k8s.monitoring:9090/api/v1/write
+      headers: {}
+      externalLabels: {}
+    logging:
+      enabled: false
+      logLevel: "info"
+
+  extensions:
+    healthCheck:
+      enabled: true
+      endpoint: "0.0.0.0:13133"
+    pprof:
+      enabled: true
+      endpoint: "0.0.0.0:1777"
+    zpages:
+      enabled: false
+      endpoint: "0.0.0.0:55679"
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "otelCollector.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ include "otelCollector.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: collector
+    app.kubernetes.io/part-of: observability
+{{ include "otelCollector.labels" . | nindent 4 }}
+data:
+  collector.yaml: |
+    {{- if .Values.config.raw -}}
+{{ tpl .Values.config.raw . | indent 4 }}
+    {{- else -}}
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: {{ .Values.receivers.otlp.grpcEndpoint | default "0.0.0.0:4317" | quote }}
+          http:
+            endpoint: {{ .Values.receivers.otlp.httpEndpoint | default "0.0.0.0:4318" | quote }}
+      {{- if .Values.receivers.hostmetrics.enabled }}
+      hostmetrics:
+        collection_interval: {{ .Values.receivers.hostmetrics.collectionInterval | default "60s" | quote }}
+        scrapers:
+          {{- /* default reasonable host scrapers; can be trimmed via values if needed */}}
+          {{- range $k, $v := ( .Values.receivers.hostmetrics.scrapers | default (dict
+              "cpu" (dict) "load" (dict) "memory" (dict) "disk" (dict)
+              "filesystem" (dict) "network" (dict) "paging" (dict) "processes" (dict) ) ) }}
+          {{ $k }}: {{- if $v }} {{ toYaml $v | nindent 12 }}{{ else }} {}{{ end }}
+          {{- end }}
+      {{- end }}
+      {{- if .Values.receivers.prometheus.enabled }}
+      prometheus:
+{{ toYaml .Values.receivers.prometheus.config | nindent 8 }}
+      {{- end }}
+
+    processors:
+      {{- if .Values.k8sAttributes.enabled }}
+      k8sattributes:
+        auth_type: "serviceAccount"
+        {{- if .Values.k8sAttributes.filterByNamespace }}
+        filter:
+          node_from_env_var: KUBE_NODE_NAME
+          namespace: {{ .Release.Namespace | quote }}
+        {{- end }}
+        extract:
+          metadata:
+            {{- range $i, $m := (.Values.k8sAttributes.extract | default (list "k8s.namespace.name" "k8s.pod.name" "k8s.container.name")) }}
+            - {{ $m | quote }}
+            {{- end }}
+          labels:
+            {{- range $l := (.Values.k8sAttributes.labels | default (list)) }}
+            - key: {{ $l.key | quote }}
+            {{- if $l.from }}
+              from: {{ $l.from | quote }}
+            {{- end }}
+            {{- end }}
+        pod_association:
+          {{- range $pa := (.Values.k8sAttributes.podAssociations | default (list (dict "from" "resource_attribute" "name" "k8s.pod.uid") (dict "from" "connection"))) }}
+          - from: {{ $pa.from | quote }}
+            {{- if $pa.name }}
+            name: {{ $pa.name | quote }}
+            {{- end }}
+          {{- end }}
+      {{- end }}
+
+      resource:
+        attributes:
+          {{- $resAttrs := ( .Values.resource.attributes | default (dict "service.namespace" .Release.Namespace ) ) -}}
+          {{- range $k, $v := $resAttrs }}
+          - key: {{ $k | quote }}
+            value: {{ $v | quote }}
+            action: upsert
+          {{- end }}
+
+      memory_limiter:
+        check_interval: {{ .Values.processors.memoryLimiter.checkInterval | default "5s" | quote }}
+        limit_percentage: {{ .Values.processors.memoryLimiter.limitPercentage | default 75 }}
+        spike_limit_percentage: {{ .Values.processors.memoryLimiter.spikeLimitPercentage | default 15 }}
+
+      batch:
+        send_batch_size: {{ .Values.processors.batch.sendBatchSize | default 8192 }}
+        timeout: {{ .Values.processors.batch.timeout | default "200ms" | quote }}
+
+      {{- if .Values.processors.tailSampling.enabled }}
+      tail_sampling:
+{{ toYaml .Values.processors.tailSampling.config | nindent 8 }}
+      {{- end }}
+
+      {{- if .Values.processors.transform.enabled }}
+      transform:
+{{ toYaml .Values.processors.transform.config | nindent 8 }}
+      {{- end }}
+
+    exporters:
+      {{- if .Values.exporters.otlp.enabled }}
+      otlp:
+        endpoint: {{ .Values.exporters.otlp.endpoint | quote }}
+        {{- if eq (lower (.Values.exporters.otlp.protocol | default "grpc")) "http" }}
+        protocol:
+          http:
+            compression: {{ .Values.exporters.otlp.compression | default "gzip" | quote }}
+            timeout: {{ .Values.exporters.otlp.timeout | default "10s" | quote }}
+        {{- else }}
+        protocol:
+          grpc:
+            compression: {{ .Values.exporters.otlp.compression | default "gzip" | quote }}
+            timeout: {{ .Values.exporters.otlp.timeout | default "10s" | quote }}
+        {{- end }}
+        tls:
+          insecure: {{ .Values.exporters.otlp.insecure | default false }}
+        {{- with .Values.exporters.otlp.headers }}
+        headers:
+{{ toYaml . | nindent 10 }}
+        {{- end }}
+        sending_queue:
+          enabled: {{ .Values.exporters.otlp.sendingQueue.enabled | default true }}
+          num_consumers: {{ .Values.exporters.otlp.sendingQueue.numConsumers | default 10 }}
+          queue_size: {{ .Values.exporters.otlp.sendingQueue.queueSize | default 10000 }}
+        retry_on_failure:
+          enabled: {{ .Values.exporters.otlp.retryOnFailure.enabled | default true }}
+          initial_interval: {{ .Values.exporters.otlp.retryOnFailure.initialInterval | default "1s" | quote }}
+          max_interval: {{ .Values.exporters.otlp.retryOnFailure.maxInterval | default "30s" | quote }}
+          max_elapsed_time: {{ .Values.exporters.otlp.retryOnFailure.maxElapsedTime | default "300s" | quote }}
+      {{- end }}
+
+      {{- if .Values.exporters.prometheus.enabled }}
+      prometheus:
+        endpoint: {{ .Values.exporters.prometheus.endpoint | default "0.0.0.0:8888" | quote }}
+        {{- with .Values.exporters.prometheus.constLabels }}
+        const_labels:
+{{ toYaml . | nindent 10 }}
+        {{- end }}
+      {{- end }}
+
+      {{- if .Values.exporters.prometheusremotewrite.enabled }}
+      prometheusremotewrite:
+        endpoint: {{ .Values.exporters.prometheusremotewrite.endpoint | quote }}
+        {{- with .Values.exporters.prometheusremotewrite.headers }}
+        headers:
+{{ toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.exporters.prometheusremotewrite.externalLabels }}
+        external_labels:
+{{ toYaml . | nindent 10 }}
+        {{- end }}
+      {{- end }}
+
+      {{- if .Values.exporters.logging.enabled }}
+      logging:
+        verbosity: {{ .Values.exporters.logging.logLevel | default "info" | quote }}
+      {{- end }}
+
+    extensions:
+      {{- if .Values.extensions.healthCheck.enabled }}
+      health_check:
+        endpoint: {{ .Values.extensions.healthCheck.endpoint | default "0.0.0.0:13133" | quote }}
+      {{- end }}
+      {{- if .Values.extensions.pprof.enabled }}
+      pprof:
+        endpoint: {{ .Values.extensions.pprof.endpoint | default "0.0.0.0:1777" | quote }}
+      {{- end }}
+      {{- if .Values.extensions.zpages.enabled }}
+      zpages:
+        endpoint: {{ .Values.extensions.zpages.endpoint | default "0.0.0.0:55679" | quote }}
+      {{- end }}
+
+    service:
+      {{- /* Enable all configured extensions */}}
+      extensions:
+        {{- if .Values.extensions.healthCheck.enabled }}- health_check{{- end }}
+        {{- if .Values.extensions.pprof.enabled }}
+        - pprof
+        {{- end }}
+        {{- if .Values.extensions.zpages.enabled }}
+        - zpages
+        {{- end }}
+
+      pipelines:
+        traces:
+          receivers:
+            - otlp
+          processors:
+            {{- if .Values.k8sAttributes.enabled }}- k8sattributes{{- end }}
+            - resource
+            - memory_limiter
+            - batch
+            {{- if .Values.processors.tailSampling.enabled }}- tail_sampling{{- end }}
+            {{- if .Values.processors.transform.enabled }}- transform{{- end }}
+          exporters:
+            {{- if .Values.exporters.otlp.enabled }}- otlp{{- end }}
+            {{- if .Values.exporters.logging.enabled }}- logging{{- end }}
+
+        metrics:
+          receivers:
+            - otlp
+            {{- if .Values.receivers.hostmetrics.enabled }}- hostmetrics{{- end }}
+            {{- if .Values.receivers.prometheus.enabled }}- prometheus{{- end }}
+          processors:
+            {{- if .Values.k8sAttributes.enabled }}- k8sattributes{{- end }}
+            - resource
+            - memory_limiter
+            - batch
+            {{- if .Values.processors.transform.enabled }}- transform{{- end }}
+          exporters:
+            {{- if .Values.exporters.prometheus.enabled }}- prometheus{{- end }}
+            {{- if .Values.exporters.prometheusremotewrite.enabled }}- prometheusremotewrite{{- end }}
+            {{- if and .Values.exporters.otlp.enabled (not .Values.exporters.prometheusremotewrite.enabled) }}- otlp{{- end }}
+            {{- if .Values.exporters.logging.enabled }}- logging{{- end }}
+
+        logs:
+          receivers:
+            - otlp
+          processors:
+            {{- if .Values.k8sAttributes.enabled }}- k8sattributes{{- end }}
+            - resource
+            - batch
+          exporters:
+            {{- if .Values.exporters.otlp.enabled }}- otlp{{- end }}
+            {{- if .Values.exporters.logging.enabled }}- logging{{- end }}
+
+    {{- /* Allow users to inject/override any part of the config tree */}}
+    {{- with .Values.config.extra }}
+{{ toYaml . | indent 4 }}
+    {{- end }}
+    {{- end }}

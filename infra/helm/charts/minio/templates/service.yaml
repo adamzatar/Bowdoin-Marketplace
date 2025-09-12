@@ -1,0 +1,205 @@
+{{- /*
+This template renders a production-grade OpenTelemetry Collector **Deployment**
+for "gateway" mode, and a matching ConfigMap containing the collector config.
+If you want node-local (agent) mode, render a DaemonSet in a separate template.
+
+Key features:
+- Non-root, read-only FS, seccomp/caps hardening
+- HPA-compatible probes and resource requests/limits
+- Optional zPages, pprof, HealthCheck
+- Supports either a fully custom config (collectorConfigOverride) or a sane
+  managed config built from values (managedPipelines)
+- Restart-on-config-change via checksum annotation
+- Extra env/envFrom, secret mounts, and spread constraints
+
+Relies on values defined in values.yaml (provided earlier).
+*/ -}}
+{{- $name := printf "%s-%s" .Release.Name "otel-collector" -}}
+{{- $namespace := (default .Values.global.namespace .Release.Namespace) -}}
+{{- $saName := (default $name .Values.serviceAccount.name) -}}
+{{- $image := printf "%s:%s" .Values.image.repository .Values.image.tag -}}
+
+{{- if eq .Values.mode "gateway" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-config
+  namespace: {{ $namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: otel-gateway
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+data:
+  collector.yaml: |
+    {{- /* Use override config if provided; otherwise render managed config */}}
+    {{- if .Values.collectorConfigOverride.enabled }}
+    {{- tpl .Values.collectorConfigOverride.config . | nindent 4 }}
+    {{- else }}
+    {{- tpl (toYaml .Values.managedPipelines) . | nindent 4 }}
+    {{- end }}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: otel-gateway
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+  annotations:
+    # Restart pods on config change
+    checksum/config: {{ include (print $.Template.BasePath "/deployment.yaml") . | sha256sum }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+      app.kubernetes.io/component: otel-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: otel-gateway
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/configmap: {{ include (print $.Template.BasePath "/deployment.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName | quote }}
+      {{- end }}
+      serviceAccountName: {{ $saName }}
+      automountServiceAccountToken: {{ ternary "true" "false" (default false .Values.serviceAccount.automount) }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and .Values.topologySpreadConstraints.enabled .Values.topologySpreadConstraints.topologyKey }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpreadConstraints.maxSkew }}
+          topologyKey: {{ .Values.topologySpreadConstraints.topologyKey | quote }}
+          whenUnsatisfiable: {{ .Values.topologySpreadConstraints.whenUnsatisfiable | quote }}
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ $name }}
+              app.kubernetes.io/component: otel-gateway
+      {{- end }}
+      containers:
+        - name: otel-collector
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--config=/conf/collector.yaml"
+            - "--set=service.telemetry.logs.level={{ .Values.debug.logLevel | default "info" }}"
+            {{- if .Values.server.tls.otlpGrpc.enabled }}
+            - "--set=receivers.otlp.protocols.grpc.tls.require_client_certs={{ ternary "true" "false" (ne .Values.server.tls.otlpGrpc.clientCaFile "") }}"
+            {{- end }}
+            {{- if .Values.server.tls.otlpHttp.enabled }}
+            - "--set=receivers.otlp.protocols.http.tls.require_client_certs={{ ternary "true" "false" (ne .Values.server.tls.otlpHttp.clientCaFile "") }}"
+            {{- end }}
+          ports:
+            {{- if .Values.service.otlpGrpcEnabled }}
+            - name: otlp-grpc
+              containerPort: {{ .Values.service.ports.otlpGrpc }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.service.otlpHttpEnabled }}
+            - name: otlp-http
+              containerPort: {{ .Values.service.ports.otlpHttp }}
+              protocol: TCP
+            {{- end }}
+            - name: metrics
+              containerPort: {{ .Values.service.ports.metrics }}
+              protocol: TCP
+            {{- if .Values.service.zpagesEnabled }}
+            - name: zpages
+              containerPort: {{ .Values.service.ports.zpages }}
+              protocol: TCP
+            {{- end }}
+          env:
+            - name: GOMAXPROCS
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.cpu
+                  divisor: "1"
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+            {{- if and .Values.backends.prometheus.remoteWrite.enabled .Values.backends.prometheus.remoteWrite.basicAuth.enabled .Values.backends.prometheus.remoteWrite.basicAuth.existingSecret }}
+            - name: PROM_REMOTE_WRITE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backends.prometheus.remoteWrite.basicAuth.existingSecret }}
+                  key: {{ .Values.backends.prometheus.remoteWrite.basicAuth.usernameKey | default "username" }}
+            - name: PROM_REMOTE_WRITE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backends.prometheus.remoteWrite.basicAuth.existingSecret }}
+                  key: {{ .Values.backends.prometheus.remoteWrite.basicAuth.passwordKey | default "password" }}
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.volumeMounts.extra }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $name }}-config
+            items:
+              - key: collector.yaml
+                path: collector.yaml
+        - name: tmp
+          emptyDir: {}
+        {{- with .Values.volumes.extra }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if .Values.image.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range .Values.image.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+{{- end }}

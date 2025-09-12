@@ -1,0 +1,399 @@
+# infra/helm/charts/minio/values.yaml
+
+# --------------------
+# Global / naming
+# --------------------
+nameOverride: ""
+fullnameOverride: ""
+namespace: bowdoin
+
+# --------------------
+# Image & Pull policy
+# --------------------
+image:
+  repository: docker.io/minio/minio
+  # Tag is typically pinned by CI to a digest. Keep default semver for local use.
+  tag: RELEASE.2024-08-29T22-14-52Z
+  pullPolicy: IfNotPresent
+  # Optionally reference registry creds
+  pullSecrets: [] # e.g. ["ghcr-creds"]
+
+# --------------------
+# Deployment mode
+# --------------------
+mode: standalone # "standalone" or "distributed"
+replicaCount: 1  # for "standalone" keep 1; for "distributed", use 4+ even numbers
+
+# For distributed mode only (ignored for standalone). Example:
+distributed:
+  drivesPerNode: 4
+  # Base path for each drive inside the container (hostPath or PVC mounts)
+  mountPathBase: /data
+  # When enabled, a headless service & StatefulSet will be used to address pods
+  useStatefulSet: true
+
+# --------------------
+# Credentials (managed outside the chart)
+# --------------------
+# Provide a pre-created Secret with keys:
+#  - MINIO_ROOT_USER
+#  - MINIO_ROOT_PASSWORD
+existingSecretName: "minio-root-credentials"
+
+# Optional: KMS (SSE-S3) configuration via existing secret keys
+kms:
+  enabled: false
+  type: none # "aws", "gcp", "hashicorp-vault", "file"
+  secretName: "" # contains keys like: MINIO_KMS_<provider>_...
+  # Example for file-kms (dev only!):
+  # type: file
+  # secretName: minio-kms-file
+
+# --------------------
+# Service
+# --------------------
+service:
+  annotations: {}
+  labels: {}
+  type: ClusterIP
+  clusterIP: null
+  # S3 API service endpoint
+  apiPort: 9000
+  # Web console endpoint
+  consolePort: 9001
+  sessionAffinity: None
+  extraPorts: [] # e.g. [{name: "debug", port: 9005, targetPort: 9005, protocol: TCP}]
+
+# --------------------
+# Ingress (API & Console)
+# --------------------
+ingress:
+  enabled: false
+  className: "nginx" # or "traefik", "alb" (if using AWS LB Controller)
+  annotations:
+    kubernetes.io/tls-acme: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+  # If using external-dns
+  externalDNS: {}
+  #  annotations:
+  #    external-dns.alpha.kubernetes.io/ttl: "300"
+  hosts:
+    api: s3.example.com
+    console: s3-console.example.com
+  tls:
+    enabled: true
+    # One secret that holds a TLS cert covering both api+console hosts, or use cert-manager
+    secretName: minio-tls
+
+# --------------------
+# TLS (pod)
+# --------------------
+# If you terminate TLS at MinIO itself (recommended for private clusters only),
+# mount certs via this secret (keys: public.crt, private.key, CAs if needed).
+podTLS:
+  enabled: false
+  secretName: "" # e.g. "minio-internal-tls"
+
+# --------------------
+# Persistence
+# --------------------
+persistence:
+  enabled: true
+  existingClaim: ""   # If provided, storageClass/size are ignored
+  storageClassName: "" # e.g. "fast-ssd"
+  accessModes: ["ReadWriteOnce"]
+  size: 200Gi
+  annotations: {}
+  labels: {}
+  # For distributed mode you typically use multiple PVCs mounted to /data{1..n}
+
+# --------------------
+# Resources & Probes
+# --------------------
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "2"
+    memory: "4Gi"
+
+# Health probes tuned for MinIO startup with new disks
+probes:
+  startupProbe:
+    enabled: true
+    httpGet:
+      path: /minio/health/ready
+      port: api
+      scheme: HTTP
+    failureThreshold: 60
+    periodSeconds: 5
+  livenessProbe:
+    enabled: true
+    httpGet:
+      path: /minio/health/live
+      port: api
+      scheme: HTTP
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+  readinessProbe:
+    enabled: true
+    httpGet:
+      path: /minio/health/ready
+      port: api
+      scheme: HTTP
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+
+# --------------------
+# Security
+# --------------------
+podSecurityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  runAsNonRoot: true
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  readOnlyRootFilesystem: true
+
+# --------------------
+# Scheduling
+# --------------------
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints:
+  enabled: true
+  rules:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector: {}
+
+# --------------------
+# Update / Disruption
+# --------------------
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# --------------------
+# Metrics / Monitoring
+# --------------------
+metrics:
+  enabled: true
+  port: 9000
+  # MinIO exposes Prometheus metrics on the API port (/minio/v2/metrics/cluster)
+  serviceMonitor:
+    enabled: true
+    namespace: monitoring
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    annotations: {}
+    scheme: http
+    tlsConfig: {}
+    relabelings: []
+    metricRelabelings: []
+    # Select the pods by the same labels the Deployment/StatefulSet applies
+    selectorOverride: {}
+    endpoints:
+      - port: api
+        path: /minio/v2/metrics/cluster
+        interval: 30s
+        scrapeTimeout: 10s
+
+# --------------------
+# Logging
+# --------------------
+logging:
+  # Structured logs to stdout; use your cluster log pipeline (e.g., Loki) to ingest.
+  level: info
+
+# --------------------
+# NetworkPolicy
+# --------------------
+networkPolicy:
+  enabled: true
+  # Default deny egress except DNS and the cluster's HTTP(S) egress ranges (customize as needed)
+  egress:
+    allowDNS: true
+    extraRules: []
+  # Only allow ingress from namespaces labeled as part of the app (or ingress controller)
+  ingress:
+    fromNamespaces:
+      - name: ingress-nginx
+      - name: bowdoin
+    extraRules: []
+
+# --------------------
+# Service Account
+# --------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+# --------------------
+# Extra env / args / volumes
+# --------------------
+extraEnv: []
+  # - name: MINIO_BROWSER_REDIRECT_URL
+  #   value: "https://s3-console.example.com"
+  # - name: MINIO_SERVER_URL
+  #   value: "https://s3.example.com"
+
+extraArgs:
+  - server
+  - /data
+  - "--console-address=:9001"
+
+extraVolumeMounts: []
+extraVolumes: []
+
+# --------------------
+# Lifecycle hooks
+# --------------------
+lifecycle:
+  preStop:
+    enabled: true
+    exec:
+      command: ["/bin/sh","-c","sleep 5"]
+
+# --------------------
+# Init containers (e.g., permissions when fsGroup is not honored by storage)
+# --------------------
+initContainers:
+  enabled: false
+  items: []
+  # - name: volume-permissions
+  #   image: busybox:1.36
+  #   command: ["sh","-c","chown -R 1000:1000 /data"]
+  #   securityContext:
+  #     runAsUser: 0
+  #   volumeMounts:
+  #     - name: data
+  #       mountPath: /data
+
+# --------------------
+# Buckets / Policies bootstrap (post-install Job)
+# --------------------
+# These are applied using MinIO Client (`mc`) in a Helm hook Job defined in templates/.
+bootstrap:
+  enabled: true
+  image:
+    repository: docker.io/minio/mc
+    tag: RELEASE.2024-08-29T00-00-00Z
+    pullPolicy: IfNotPresent
+  # Credentials source for mc (reuses server root by default)
+  existingSecretName: "" # defaults to .Values.existingSecretName if empty
+  # Endpoint used by the job to reach the service
+  endpoint: "http://{{ .Release.Name }}-minio.{{ .Release.Namespace }}.svc.cluster.local:9000"
+  # TLS for mc (set to true if you expose TLS on the service)
+  tls:
+    enabled: false
+    # If enabled, mount this secret with CA/certs for mc, keys: public.crt, private.key, CAs
+    secretName: ""
+  # Create buckets, versioning & lifecycle config
+  buckets:
+    - name: uploads
+      policy: none        # none | download | upload | public
+      versioning: true
+      objectLocking: false
+      lifecycle:
+        enabled: true
+        rules:
+          - id: "tmp-cleanup"
+            enabled: true
+            prefix: "tmp/"
+            expiration:
+              days: 7
+    - name: images
+      policy: download
+      versioning: true
+      lifecycle:
+        enabled: true
+        rules:
+          - id: "noncurrent-cleanup"
+            enabled: true
+            noncurrentVersionExpiration:
+              noncurrentDays: 30
+  # Additional users and policies (optional)
+  users: []
+  #  - accessKey: "app-user"
+  #    secretKeySecretName: "minio-app-user" # secret with key: password
+  #    policy: "readwrite"                   # or custom policy name
+  policies: []
+  #  - name: "readwrite"
+  #    statements:
+  #      - effect: "Allow"
+  #        action: ["s3:*"]
+  #        resource: ["arn:aws:s3:::uploads/*","arn:aws:s3:::images/*"]
+
+# --------------------
+# Annotations & Labels
+# --------------------
+podAnnotations:
+  checksum/credentials: "" # auto-populated by template when secrets change
+  prometheus.io/scrape: "true"
+  prometheus.io/path: "/minio/v2/metrics/cluster"
+  prometheus.io/port: "9000"
+
+podLabels:
+  app.kubernetes.io/part-of: bowdoin-marketplace
+  metrics.exposed: "true"
+
+# --------------------
+# Backup (Velero) Hints
+# --------------------
+backup:
+  enabled: true
+  annotations:
+    backup.velero.io/backup-volumes: "data"
+
+# --------------------
+# Tests (helm hooks)
+# --------------------
+tests:
+  enabled: true
+  image:
+    repository: curlimages/curl
+    tag: 8.8.0
+  command: ["sh","-c","curl -sf http://{{ .Release.Name }}-minio:9000/minio/health/ready"]
+  buckets:
+  enabled: true
+  definitions:
+    - name: uploads
+      policy: public   # options: private, download, upload, public
+      lifecycle:
+        expireDays: 90
+    - name: backups
+      policy: private
+      lifecycle:
+        expireDays: 365
+    - name: tmp
+      policy: private
+      lifecycle:
+        expireDays: 7

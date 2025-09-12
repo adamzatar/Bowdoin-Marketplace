@@ -1,0 +1,77 @@
+# infra/helm/charts/app/Chart.yaml
+apiVersion: v2
+name: bowdoin-marketplace-app
+description: >
+  Bowdoin Marketplace – Next.js API/UI service. Ships a secure Deployment,
+  Service, Ingress, HPA, PDB, ServiceMonitor, and Config/Secret templates.
+type: application
+
+# Chart (packaging) version — bump on any chart change
+version: 0.1.0
+
+# App version — informational, typically image tag (e.g., Git SHA or semver)
+appVersion: "1.0.0"
+
+kubeVersion: ">=1.25.0-0"
+
+keywords:
+  - nextjs
+  - node
+  - marketplace
+  - bowdoin
+  - web
+
+home: https://github.com/your-org/bowdoin-marketplace
+sources:
+  - https://github.com/your-org/bowdoin-marketplace/apps/web
+icon: https://raw.githubusercontent.com/your-org/bowdoin-marketplace/main/docs/assets/icon.png
+
+maintainers:
+  - name: Platform Team
+    email: platform@yourdomain.example
+
+annotations:
+  # ArtifactHub hints (optional)
+  artifacthub.io/license: MIT
+  artifacthub.io/links: |
+    - name: Source
+      url: https://github.com/your-org/bowdoin-marketplace
+    - name: Docs
+      url: https://github.com/your-org/bowdoin-marketplace/tree/main/docs
+  # Helm metadata
+  helm.sh/images: |
+    - name: app
+      image: ghcr.io/your-org/bowdoin-marketplace/app:latest
+      whitelisted: true
+
+# Optional subcharts this app can wire up (toggle via values)
+dependencies:
+  # PostgreSQL (managed outside or via this subchart)
+  - name: postgres
+    version: "0.1.0"
+    repository: "file://../postgres"
+    condition: postgres.enabled
+
+  # Redis (rate limit, sessions, queues)
+  - name: redis
+    version: "0.1.0"
+    repository: "file://../redis"
+    condition: redis.enabled
+
+  # MinIO (object storage for uploads) – optional if using S3/GCS
+  - name: minio
+    version: "0.1.0"
+    repository: "file://../minio"
+    condition: minio.enabled
+
+  # OpenTelemetry Collector (export traces/metrics/logs)
+  - name: otel-collector
+    version: "0.1.0"
+    repository: "file://../otel-collector"
+    condition: otelCollector.enabled
+
+  # Monitoring stack namespace scaffold (ServiceMonitor, rules target this)
+  - name: prometheus-stack
+    version: "0.1.0"
+    repository: "file://../prometheus-stack"
+    condition: monitoring.prometheusStack.enabled

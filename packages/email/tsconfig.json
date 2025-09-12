@@ -1,0 +1,46 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+
+    "verbatimModuleSyntax": true,
+    "allowSyntheticDefaultImports": true,
+    "exactOptionalPropertyTypes": true,
+    "skipLibCheck": true,
+
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "stripInternal": true,
+    "resolveJsonModule": true,
+    "noEmit": false,
+
+    "jsx": "react-jsx",
+    "types": ["node", "vitest"],
+
+    "baseUrl": ".",
+    "paths": {
+      "@bowdoin/config": ["../config/dist/index.d.ts"],
+      "@bowdoin/config/*": ["../config/dist/*"],
+      "@bowdoin/observability": ["../observability/dist/index.d.ts"],
+      "@bowdoin/observability/*": ["../observability/dist/*"]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.mts", "src/**/*.d.ts"],
+  "exclude": [
+    "dist",
+    "node_modules",
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "**/__tests__/**",
+    "**/__mocks__/**"
+  ]
+}

@@ -1,0 +1,387 @@
+# infra/helm/charts/minio/templates/deployment.yaml
+#
+# Renders a Deployment for "standalone" mode and a StatefulSet for "distributed" mode.
+# Uses sane security defaults, health probes, and persistent storage.
+# Assumes a Service (and a headless Service for distributed) are rendered in templates/service.yaml.
+
+{{- $name := printf "%s-minio" .Release.Name -}}
+{{- $ns := .Release.Namespace -}}
+{{- $labels := dict
+  "app.kubernetes.io/name" "minio"
+  "app.kubernetes.io/instance" .Release.Name
+  "app.kubernetes.io/managed-by" "Helm"
+  "app.kubernetes.io/part-of" "bowdoin-marketplace"
+  "helm.sh/chart" (printf "%s-%s" .Chart.Name .Chart.Version)
+  "metrics.exposed" "true"
+-}}
+{{- $sa := default (printf "%s-sa" $name) .Values.serviceAccount.name -}}
+{{- $apiPort := int (default 9000 .Values.service.apiPort) -}}
+{{- $consolePort := int (default 9001 .Values.service.consolePort) -}}
+{{- $pc := .Values.persistence -}}
+{{- $img := .Values.image -}}
+{{- $pullSecrets := .Values.image.pullSecrets | default list -}}
+{{- $mode := lower (default "standalone" .Values.mode) -}}
+{{- $dist := .Values.distributed | default dict -}}
+{{- $drivesPerNode := int (default 1 $dist.drivesPerNode) -}}
+{{- $mountBase := default "/data" $dist.mountPathBase -}}
+{{- $probes := .Values.probes -}}
+{{- $psc := .Values.podSecurityContext -}}
+{{- $csc := .Values.containerSecurityContext -}}
+{{- $topology := .Values.topologySpreadConstraints -}}
+{{- $priorityClassName := .Values.priorityClassName | default "" -}}
+{{- $updateStrategy := .Values.updateStrategy | default dict -}}
+{{- $extraEnv := .Values.extraEnv | default list -}}
+{{- $extraArgs := .Values.extraArgs | default (list "server" "/data" (printf "--console-address=:%d" $consolePort)) -}}
+{{- $extraVols := .Values.extraVolumes | default list -}}
+{{- $extraMounts := .Values.extraVolumeMounts | default list -}}
+{{- $lifecycle := .Values.lifecycle | default dict -}}
+{{- $init := .Values.initContainers | default dict -}}
+{{- $podTLS := .Values.podTLS | default dict -}}
+
+{{/* ------------------------------ STANDALONE (Deployment) ------------------------------ */}}
+{{- if eq $mode "standalone" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels: {{- toYaml $labels | nindent 4 }}
+spec:
+  replicas: {{ int (default 1 .Values.replicaCount) }}
+  strategy:
+    type: {{ default "RollingUpdate" $updateStrategy.type }}
+    rollingUpdate:
+      maxUnavailable: {{ default 0 $updateStrategy.rollingUpdate.maxUnavailable }}
+      maxSurge: {{ default 1 $updateStrategy.rollingUpdate.maxSurge }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- toYaml $labels | nindent 8 }}
+      annotations:
+        # Restart on secret change (external secret checksum can be injected via values)
+        checksum/credentials: {{ default "" .Values.podAnnotations.checksum | quote }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/minio/v2/metrics/cluster"
+        prometheus.io/port: {{ $apiPort | quote }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ $sa }}
+      {{- end }}
+      automountServiceAccountToken: {{ default false .Values.serviceAccount.automountServiceAccountToken }}
+      {{- if $pullSecrets }}
+      imagePullSecrets:
+        {{- range $ps := $pullSecrets }}
+        - name: {{ $ps }}
+        {{- end }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $psc | nindent 8 }}
+      {{- if and $init.enabled $init.items }}
+      initContainers:
+        {{- range $ic := $init.items }}
+        - {{- toYaml $ic | nindent 10 }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: minio
+          image: "{{ $img.repository }}:{{ $img.tag }}"
+          imagePullPolicy: {{ $img.pullPolicy | default "IfNotPresent" }}
+          {{- if $lifecycle.preStop.enabled }}
+          lifecycle:
+            preStop:
+              {{- toYaml $lifecycle.preStop | nindent 14 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml $csc | nindent 12 }}
+          args:
+            {{- range $arg := $extraArgs }}
+            - {{ $arg | quote }}
+            {{- end }}
+          env:
+            # Root credentials from existing secret
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "existingSecretName is required" .Values.existingSecretName }}
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "existingSecretName is required" .Values.existingSecretName }}
+                  key: MINIO_ROOT_PASSWORD
+            - name: MINIO_BROWSER
+              value: "on"
+            - name: MINIO_PROMETHEUS_AUTH_TYPE
+              value: "public"
+            {{- if and $podTLS.enabled $podTLS.secretName }}
+            - name: MINIO_CERTS_DIR
+              value: "/certs"
+            {{- end }}
+            {{- range $e := $extraEnv }}
+            - {{- toYaml $e | nindent 14 }}
+            {{- end }}
+          ports:
+            - name: api
+              containerPort: {{ $apiPort }}
+              protocol: TCP
+            - name: console
+              containerPort: {{ $consolePort }}
+              protocol: TCP
+          {{- if $probes.startupProbe.enabled }}
+          startupProbe:
+            {{- toYaml $probes.startupProbe | nindent 12 }}
+          {{- end }}
+          {{- if $probes.livenessProbe.enabled }}
+          livenessProbe:
+            {{- toYaml $probes.livenessProbe | nindent 12 }}
+          {{- end }}
+          {{- if $probes.readinessProbe.enabled }}
+          readinessProbe:
+            {{- toYaml $probes.readinessProbe | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.persistence.enabled }}
+            - name: data
+              mountPath: /data
+            {{- else }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+            {{- if and $podTLS.enabled $podTLS.secretName }}
+            - name: minio-tls
+              mountPath: /certs
+              readOnly: true
+            {{- end }}
+            {{- range $m := $extraMounts }}
+            - {{- toYaml $m | nindent 14 }}
+            {{- end }}
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName }}
+      {{- end }}
+      {{- if and $topology.enabled $topology.rules }}
+      topologySpreadConstraints:
+        {{- range $rule := $topology.rules }}
+        - {{- toYaml $rule | nindent 10 }}
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: minio
+              app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- end }}
+      {{- end }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      volumes:
+        {{- if .Values.persistence.enabled }}
+        {{- if .Values.persistence.existingClaim }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim }}
+        {{- else }}
+        # Using dynamic provisioned PVC bound via a separate PVC template is recommended.
+        # Fallback to EmptyDir if no existingClaim is provided.
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- else }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- if and $podTLS.enabled $podTLS.secretName }}
+        - name: minio-tls
+          secret:
+            secretName: {{ $podTLS.secretName }}
+        {{- end }}
+        {{- range $v := $extraVols }}
+        - {{- toYaml $v | nindent 10 }}
+        {{- end }}
+{{- end }}
+
+{{/* ------------------------------ DISTRIBUTED (StatefulSet) ------------------------------ */}}
+{{- if and (eq $mode "distributed") (default true $dist.useStatefulSet) }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels: {{- toYaml $labels | nindent 4 }}
+spec:
+  serviceName: {{ printf "%s-hl" $name }}
+  replicas: {{ int (default 4 .Values.replicaCount) }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: {{ default "RollingUpdate" $updateStrategy.type }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- toYaml $labels | nindent 8 }}
+      annotations:
+        checksum/credentials: {{ default "" .Values.podAnnotations.checksum | quote }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/minio/v2/metrics/cluster"
+        prometheus.io/port: {{ $apiPort | quote }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ $sa }}
+      {{- end }}
+      automountServiceAccountToken: {{ default false .Values.serviceAccount.automountServiceAccountToken }}
+      {{- if $pullSecrets }}
+      imagePullSecrets:
+        {{- range $ps := $pullSecrets }}
+        - name: {{ $ps }}
+        {{- end }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $psc | nindent 8 }}
+      {{- if and $init.enabled $init.items }}
+      initContainers:
+        {{- range $ic := $init.items }}
+        - {{- toYaml $ic | nindent 10 }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: minio
+          image: "{{ $img.repository }}:{{ $img.tag }}"
+          imagePullPolicy: {{ $img.pullPolicy | default "IfNotPresent" }}
+          {{- if $lifecycle.preStop.enabled }}
+          lifecycle:
+            preStop:
+              {{- toYaml $lifecycle.preStop | nindent 14 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml $csc | nindent 12 }}
+          command: ["/bin/sh","-c"]
+          args:
+            - >
+              exec minio server
+              --console-address=:{{ $consolePort }}
+              {{- /* Use MinIO set expansion to avoid ultra-long arg lists */ -}}
+              http://{{ $name }}-{0...{{ sub (int (default 4 .Values.replicaCount)) 1 }}}.{{ $name }}-hl.{{ $ns }}.svc.cluster.local:{{ $apiPort }}{{ $mountBase }}{1...{{ $drivesPerNode }}}
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "existingSecretName is required" .Values.existingSecretName }}
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "existingSecretName is required" .Values.existingSecretName }}
+                  key: MINIO_ROOT_PASSWORD
+            - name: MINIO_BROWSER
+              value: "on"
+            - name: MINIO_PROMETHEUS_AUTH_TYPE
+              value: "public"
+            {{- if and $podTLS.enabled $podTLS.secretName }}
+            - name: MINIO_CERTS_DIR
+              value: "/certs"
+            {{- end }}
+            {{- range $e := $extraEnv }}
+            - {{- toYaml $e | nindent 14 }}
+            {{- end }}
+          ports:
+            - name: api
+              containerPort: {{ $apiPort }}
+              protocol: TCP
+            - name: console
+              containerPort: {{ $consolePort }}
+              protocol: TCP
+          {{- if $probes.startupProbe.enabled }}
+          startupProbe:
+            {{- toYaml $probes.startupProbe | nindent 12 }}
+          {{- end }}
+          {{- if $probes.livenessProbe.enabled }}
+          livenessProbe:
+            {{- toYaml $probes.livenessProbe | nindent 12 }}
+          {{- end }}
+          {{- if $probes.readinessProbe.enabled }}
+          readinessProbe:
+            {{- toYaml $probes.readinessProbe | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- range $i, $_ := until $drivesPerNode }}
+            - name: data-{{ add $i 1 }}
+              mountPath: {{ printf "%s%d" $mountBase (add $i 1) | quote }}
+            {{- end }}
+            {{- if and $podTLS.enabled $podTLS.secretName }}
+            - name: minio-tls
+              mountPath: /certs
+              readOnly: true
+            {{- end }}
+            {{- range $m := $extraMounts }}
+            - {{- toYaml $m | nindent 14 }}
+            {{- end }}
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName }}
+      {{- end }}
+      {{- if and $topology.enabled $topology.rules }}
+      topologySpreadConstraints:
+        {{- range $rule := $topology.rules }}
+        - {{- toYaml $rule | nindent 10 }}
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: minio
+              app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- end }}
+      {{- end }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      volumes:
+        {{- if and $podTLS.enabled $podTLS.secretName }}
+        - name: minio-tls
+          secret:
+            secretName: {{ $podTLS.secretName }}
+        {{- end }}
+        {{- range $v := $extraVols }}
+        - {{- toYaml $v | nindent 10 }}
+        {{- end }}
+  volumeClaimTemplates:
+    {{- if .Values.persistence.enabled }}
+    {{- if not .Values.persistence.existingClaim }}
+    {{- range $i, $_ := until $drivesPerNode }}
+    - metadata:
+        name: data-{{ add $i 1 }}
+        labels: {{- toYaml $labels | nindent 10 }}
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | default "200Gi" }}
+        {{- if .Values.persistence.storageClassName }}
+        storageClassName: {{ .Values.persistence.storageClassName }}
+        {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}

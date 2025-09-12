@@ -1,0 +1,284 @@
+# infra/helm/k8s-namespace.yaml
+# Multi-doc manifest to create a hardened application namespace with sensible, production-ready defaults.
+# This file is Helm-templated. Apply via Helm or render with `helm template ...`.
+
+# ----------------------------
+# Namespace (labels & security)
+# ----------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace | default "bowdoin" }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.namespace | default "bowdoin" }}
+    app.kubernetes.io/part-of: bowdoin-marketplace
+    # PSA: Pod Security Admission (enforce restricted)
+    pod-security.kubernetes.io/enforce: "restricted"
+    pod-security.kubernetes.io/enforce-version: "latest"
+    pod-security.kubernetes.io/audit: "restricted"
+    pod-security.kubernetes.io/warn: "restricted"
+  annotations:
+    owner/team: {{ .Values.ownerTeam | default "platform" | quote }}
+spec: {}
+---
+# ----------------
+# Resource Quotas
+# ----------------
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compute-and-storage
+  namespace: {{ .Values.namespace | default "bowdoin" }}
+spec:
+  hard:
+    requests.cpu: {{ .Values.resourceQuota.requestsCpu | default "2" | quote }}
+    requests.memory: {{ .Values.resourceQuota.requestsMemory | default "8Gi" | quote }}
+    limits.cpu: {{ .Values.resourceQuota.limitsCpu | default "4" | quote }}
+    limits.memory: {{ .Values.resourceQuota.limitsMemory | default "16Gi" | quote }}
+    requests.storage: {{ .Values.resourceQuota.requestsStorage | default "500Gi" | quote }}
+    persistentvolumeclaims: {{ .Values.resourceQuota.pvcs | default "50" | quote }}
+    pods: {{ .Values.resourceQuota.pods | default "200" | quote }}
+---
+# ------------
+# Limit Ranges
+# ------------
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: {{ .Values.namespace | default "bowdoin" }}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: {{ .Values.limitRange.defaultCpu | default "500m" | quote }}
+        memory: {{ .Values.limitRange.defaultMemory | default "512Mi" | quote }}
+      defaultRequest:
+        cpu: {{ .Values.limitRange.requestCpu | default "100m" | quote }}
+        memory: {{ .Values.limitRange.requestMemory | default "256Mi" | quote }}
+      max:
+        cpu: {{ .Values.limitRange.maxCpu | default "2" | quote }}
+        memory: {{ .Values.limitRange.maxMemory | default "2Gi" | quote }}
+      min:
+        cpu: {{ .Values.limitRange.minCpu | default "50m" | quote }}
+        memory: {{ .Values.limitRange.minMemory | default "128Mi" | quote }}
+---
+# ---------------------------------------
+# Default deny all ingress/egress traffic
+# ---------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ .Values.namespace | default "bowdoin" }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# -------------------------------------
+# Allow same-namespace app-to-app traffic
+# (pods sharing part-of label)
+# -------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace-app
+  namespace: {{ .Values.namespace | default "bowdoin" }}
+spec:
+  podSelector: {}
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: bowdoin-marketplace
+  policyTypes: ["Ingress"]
+---
+# -------------------------------------
+# Allow DNS egress to kube-dns only
+# -------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: {{ .Values.namespace | default "bowdoin" }}
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# ----------------------------------------------------
+# Allow ingress only from the cluster ingress controller
+# ----------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-ingress
+  namespace: {{ .Values.namespace | default "bowdoin" }}
+spec:
+  podSelector: {}
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.ingress.namespace | default "ingress-nginx" | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.ingress.controllerLabel | default "ingress-nginx" | quote }}
+  policyTypes: ["Ingress"]
+---
+# --------------------------------------------------------------------
+# Allow ingress from Prometheus to scrape metrics endpoints (optional)
+# --------------------------------------------------------------------
+{{- if not (hasKey .Values "monitoring") | or .Values.monitoring.enabled | default true }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: {{ .Values.namespace | default "bowdoin" }}
+spec:
+  podSelector:
+    matchLabels:
+      metrics.exposed: "true"
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.monitoring.namespace | default "monitoring" | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.monitoring.prometheusLabel | default "kube-prometheus-stack-prometheus" | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.monitoring.scrapePort | default 9464 }}
+  policyTypes: ["Ingress"]
+{{- end }}
+---
+# --------------------------------------------------------------------
+# Allow egress to internal services (DB/Redis/OTEL) by namespace/label
+# (tighten these selectors to your cluster standards)
+# --------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-internal-services
+  namespace: {{ .Values.namespace | default "bowdoin" }}
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    # Postgres
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.datastores.postgres.namespace | default "datastores" | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.datastores.postgres.label | default "postgres" | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.datastores.postgres.port | default 5432 }}
+    # Redis
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.datastores.redis.namespace | default "datastores" | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.datastores.redis.label | default "redis" | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.datastores.redis.port | default 6379 }}
+    # OTEL Collector (OTLP/HTTP)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.observability.otel.namespace | default "observability" | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.observability.otel.label | default "otel-collector" | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.observability.otel.port | default 4318 }}
+{{- if .Values.objectStorage.enabled }}
+    # Object storage gateway (when running in-cluster, e.g., MinIO)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.objectStorage.namespace | default "datastores" | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.objectStorage.label | default "minio" | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.objectStorage.port | default 9000 }}
+{{- end }}
+---
+# ----------------------------------------------------
+# Default ServiceAccount + optional imagePullSecrets
+# ----------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: {{ .Values.namespace | default "bowdoin" }}
+  annotations:
+    kubernetes.io/enforce-mountable-secrets: "true"
+automountServiceAccountToken: false
+imagePullSecrets:
+{{- if .Values.imagePullSecrets }}
+{{- range $s := .Values.imagePullSecrets }}
+  - name: {{ $s }}
+{{- end }}
+{{- else }}
+  []
+{{- end }}
+---
+# ----------------------------------------------------
+# Read-only RBAC for configmaps/secrets (namespaced)
+# Only created when there are secrets to reference.
+# ----------------------------------------------------
+{{- $readonlySecrets := (default (list) .Values.rbac.readonlySecretNames) -}}
+{{- if $readonlySecrets }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: readonly-config
+  namespace: {{ .Values.namespace | default "bowdoin" }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get","list","watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+{{ toYaml $readonlySecrets | indent 6 }}
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: readonly-config-binding
+  namespace: {{ .Values.namespace | default "bowdoin" }}
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: {{ .Values.namespace | default "bowdoin" }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: readonly-config
+{{- end }}

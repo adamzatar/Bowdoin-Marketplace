@@ -1,0 +1,73 @@
+{
+  "name": "@bowdoin/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./schemas/*": {
+      "types": "./dist/schemas/*.d.ts",
+      "default": "./dist/schemas/*.js"
+    },
+    "./openapi/openapi.json": "./openapi/openapi.json",
+    "./openapi/openapi.yaml": "./openapi/openapi.yaml",
+    "./package.json": "./package.json"
+  },
+
+  "typesVersions": {
+    "*": {
+      "schemas/*": [
+        "dist/schemas/*"
+      ],
+      "*": [
+        "dist/*"
+      ]
+    }
+  },
+
+  "files": [
+    "dist",
+    "openapi/openapi.json",
+    "openapi/openapi.yaml",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ],
+
+  "scripts": {
+    "clean": "rimraf dist tsconfig.tsbuildinfo",
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit",
+    "lint": "eslint src --ext .ts,.tsx,.mts,.cts",
+    "generate:openapi": "ts-node --esm src/openapi.ts",
+    "prepublishOnly": "pnpm run clean && pnpm run build && pnpm run generate:openapi"
+  },
+
+  "dependencies": {
+    "openapi3-ts": "^4.5.0",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.24.6"
+  },
+
+  "devDependencies": {
+    "@anatine/zod-openapi": "^2.2.3",
+    "@types/node": "^20.19.13",
+    "eslint": "^9.35.0",
+    "prettier": "^3",
+    "rimraf": "^6.0.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  },
+
+  "engines": {
+    "node": ">=18.17.0"
+  }
+}

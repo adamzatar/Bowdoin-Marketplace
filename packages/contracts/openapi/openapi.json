@@ -1,0 +1,421 @@
+openapi: 3.1.0
+info:
+  title: Bowdoin Marketplace API
+  version: 1.0.0
+  description: Unified OpenAPI contract for authentication, users, listings, messaging, uploads, and administration.
+servers:
+  - url: /api
+    description: App Router base
+paths: {}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT issued by NextAuth (Okta OIDC).
+  schemas:
+    Role:
+      type: string
+      enum: [admin, staff, student, community]
+      description: Application roles mapped from Okta groups (Bowdoin) or flagged as community.
+    AffiliationType:
+      type: string
+      enum: [bowdoin, community]
+      description: Differentiates Bowdoin-associated accounts from Brunswick community users.
+    Affiliation:
+      type: object
+      required: [type, verified]
+      additionalProperties: false
+      properties:
+        type:
+          $ref: '#/components/schemas/AffiliationType'
+        verified:
+          type: boolean
+          description: Whether affiliation is verified (SSO for Bowdoin, email token for community).
+        evidence:
+          type: string
+          nullable: true
+          description: Optional note on how verification was achieved (issuer, email domain, etc.).
+    User:
+      type: object
+      required: [id, email, role, affiliation, createdAt]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+          nullable: true
+        role:
+          $ref: '#/components/schemas/Role'
+        affiliation:
+          $ref: '#/components/schemas/Affiliation'
+        createdAt:
+          type: string
+          format: date-time
+        lastLoginAt:
+          type: string
+          format: date-time
+          nullable: true
+    Audience:
+      type: string
+      enum: [campus, community, both]
+      description: Who can view the listing.
+    Condition:
+      type: string
+      enum: [new, good, fair, poor]
+      description: Item condition.
+    ListingStatus:
+      type: string
+      enum: [active, sold, expired, removed]
+    ListingPhoto:
+      type: object
+      required: [url]
+      additionalProperties: false
+      properties:
+        url:
+          type: string
+          format: uri
+        alt:
+          type: string
+          nullable: true
+    Listing:
+      type: object
+      required:
+        [id, userId, title, price, isFree, status, audience, createdAt, updatedAt]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        title:
+          type: string
+          minLength: 1
+          maxLength: 160
+        description:
+          type: string
+          nullable: true
+          maxLength: 5000
+        price:
+          type: number
+          minimum: 0
+        isFree:
+          type: boolean
+        condition:
+          $ref: '#/components/schemas/Condition'
+        category:
+          type: string
+          nullable: true
+        location:
+          type: string
+          nullable: true
+        availableStart:
+          type: string
+          format: date
+          nullable: true
+        availableEnd:
+          type: string
+          format: date
+          nullable: true
+        status:
+          $ref: '#/components/schemas/ListingStatus'
+        audience:
+          $ref: '#/components/schemas/Audience'
+        photos:
+          type: array
+          items:
+            $ref: '#/components/schemas/ListingPhoto'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ListingCreateInput:
+      type: object
+      required: [title, price, isFree, audience]
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 160
+        description:
+          type: string
+          nullable: true
+          maxLength: 5000
+        price:
+          type: number
+          minimum: 0
+        isFree:
+          type: boolean
+        condition:
+          $ref: '#/components/schemas/Condition'
+        category:
+          type: string
+          nullable: true
+        location:
+          type: string
+          nullable: true
+        availableStart:
+          type: string
+          format: date
+          nullable: true
+        availableEnd:
+          type: string
+          format: date
+          nullable: true
+        audience:
+          $ref: '#/components/schemas/Audience'
+        photos:
+          type: array
+          maxItems: 6
+          items:
+            $ref: '#/components/schemas/ListingPhoto'
+    ListingUpdateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 160
+        description:
+          type: string
+          nullable: true
+          maxLength: 5000
+        price:
+          type: number
+          minimum: 0
+        isFree:
+          type: boolean
+        condition:
+          $ref: '#/components/schemas/Condition'
+        category:
+          type: string
+          nullable: true
+        location:
+          type: string
+          nullable: true
+        availableStart:
+          type: string
+          format: date
+          nullable: true
+        availableEnd:
+          type: string
+          format: date
+          nullable: true
+        audience:
+          $ref: '#/components/schemas/Audience'
+        status:
+          $ref: '#/components/schemas/ListingStatus'
+        photos:
+          type: array
+          maxItems: 6
+          items:
+            $ref: '#/components/schemas/ListingPhoto'
+    ListingSearchQuery:
+      type: object
+      additionalProperties: false
+      properties:
+        q:
+          type: string
+          nullable: true
+          maxLength: 200
+        category:
+          type: string
+          nullable: true
+        audience:
+          $ref: '#/components/schemas/Audience'
+        minPrice:
+          type: number
+          minimum: 0
+          nullable: true
+        maxPrice:
+          type: number
+          minimum: 0
+          nullable: true
+        cursor:
+          type: string
+          nullable: true
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+        sort:
+          type: string
+          enum: [newest, price_asc, price_desc, relevance]
+          default: relevance
+    Thread:
+      type: object
+      required: [id, listingId, sellerId, buyerId, createdAt]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        listingId:
+          type: string
+          format: uuid
+        sellerId:
+          type: string
+          format: uuid
+        buyerId:
+          type: string
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        closed:
+          type: boolean
+          default: false
+    Message:
+      type: object
+      required: [id, threadId, senderId, body, sentAt]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        threadId:
+          type: string
+          format: uuid
+        senderId:
+          type: string
+          format: uuid
+        body:
+          type: string
+          minLength: 1
+          maxLength: 5000
+        sentAt:
+          type: string
+          format: date-time
+    MessageCreateInput:
+      type: object
+      required: [body]
+      additionalProperties: false
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 5000
+    UploadPresignRequest:
+      type: object
+      required: [contentType, size]
+      additionalProperties: false
+      properties:
+        contentType:
+          type: string
+        size:
+          type: integer
+          minimum: 1
+          maximum: 5242880
+    UploadPresignResponse:
+      type: object
+      required: [url, fields, maxSize]
+      additionalProperties: false
+      properties:
+        url:
+          type: string
+          format: uri
+        fields:
+          type: object
+          additionalProperties:
+            type: string
+          description: Form fields for POST to S3 (policy, signature, etc.)
+        maxSize:
+          type: integer
+    Health:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    ReportReason:
+      type: string
+      enum: [spam, inappropriate, prohibited, other]
+    Report:
+      type: object
+      required: [id, status, createdAt, reason, reporterId]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        reportedListingId:
+          type: string
+          format: uuid
+          nullable: true
+        reportedUserId:
+          type: string
+          format: uuid
+          nullable: true
+        reporterId:
+          type: string
+          format: uuid
+        reason:
+          $ref: '#/components/schemas/ReportReason'
+        details:
+          type: string
+          nullable: true
+          maxLength: 2000
+        status:
+          type: string
+          enum: [open, reviewed, actioned, dismissed]
+        createdAt:
+          type: string
+          format: date-time
+    BanUserRequest:
+      type: object
+      required: [reason]
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1000
+    OkResponse:
+      type: object
+      required: [ok]
+      additionalProperties: false
+      properties:
+        ok:
+          type: boolean
+          const: true
+    PagedListingResult:
+      type: object
+      required: [items]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Listing'
+        nextCursor:
+          type: string
+          nullable: true
+    PagedThreadResult:
+      type: object
+      required: [items]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Thread'
+        nextCursor:
+          type: string
+          nullable: true
+security:
+  - bearerAuth: []

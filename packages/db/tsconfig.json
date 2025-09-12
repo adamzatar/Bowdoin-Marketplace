@@ -1,0 +1,41 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@bowdoin/config": ["../config/dist/index.d.ts"],
+      "@bowdoin/config/*": ["../config/dist/*"],
+      "@bowdoin/observability": ["../observability/dist/index.d.ts"],
+      "@bowdoin/observability/*": ["../observability/dist/*"]
+    },
+    "composite": true,
+    "rootDir": ".",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": true,
+    "module": "ESNext",
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "noEmit": false,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "exactOptionalPropertyTypes": true,
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "scripts/**/*.mts",
+    "prisma/**/*.ts"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules",
+    "prisma/migrations/**",
+    "**/*.test.ts",
+    "**/*.spec.ts"
+  ]
+}

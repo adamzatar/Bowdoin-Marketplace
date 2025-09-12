@@ -1,0 +1,476 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# prometheus-stack (umbrella) – production-grade defaults
+# This values.yaml configures the upstream kube-prometheus-stack + (optional)
+# prometheus-adapter. It is opinionated for production (HA, persistence, RBAC,
+# network policies, resource limits, secure defaults). Tune to your cluster.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ---------------------------
+# Global, shared conventions
+# ---------------------------
+global:
+  # Label all objects so Prometheus/Grafana can tag metrics by env/cluster.
+  environment: "prod"
+  cluster: "primary"
+
+  # If you pull from private registries
+  imagePullSecrets: []
+  # - name: my-regcred
+
+  # Default pod security context for components that honor it
+  podSecurityContext:
+    fsGroup: 65534   # nobody
+    runAsGroup: 65534
+    runAsUser: 65534
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Default container security context
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop: ["ALL"]
+
+# Toggle subcharts
+kubePrometheusStack:
+  enabled: true
+
+prometheusAdapter:
+  enabled: true
+
+# ──────────────────────────────────────────────────────────────────────────────
+# kube-prometheus-stack (Prometheus Operator + Prometheus + Alertmanager + Grafana)
+# Docs: https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack
+# ──────────────────────────────────────────────────────────────────────────────
+kubePrometheusStack:
+  fullnameOverride: prometheus-stack
+
+  crds:
+    enabled: true
+
+  #######################################################################
+  # Default recording/alerting rules
+  #######################################################################
+  defaultRules:
+    create: true
+    runbookUrl: https://runbooks.prometheus-operator.dev/runbooks
+    labels:
+      team: platform
+    # Disable any rules you do not want; keep most enabled for prod.
+    disabled: {}
+    #  Alert routing labels added to all alerts (useful for Alertmanager routing)
+    additionalRuleLabels:
+      env: prod
+      cluster: primary
+
+  #######################################################################
+  # Prometheus Operator (manages Prometheus/Alertmanager CRs)
+  #######################################################################
+  prometheusOperator:
+    enabled: true
+    admissionWebhooks:
+      enabled: true
+      patch:
+        enabled: true
+    tls:
+      enabled: true
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits:   { cpu: "500m", memory: "512Mi" }
+    podSecurityContext: *podSecurityContext
+    containerSecurityContext: *containerSecurityContext
+
+  #######################################################################
+  # Alertmanager
+  #######################################################################
+  alertmanager:
+    enabled: true
+    ingress:
+      enabled: false
+      # className: "nginx"
+      # hosts: ["alertmanager.example.com"]
+      # tls:
+      #   - secretName: alertmanager-tls
+      #     hosts: ["alertmanager.example.com"]
+
+    alertmanagerSpec:
+      replicas: 2
+      retention: 120h
+      storage:
+        volumeClaimTemplate:
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 10Gi
+            # storageClassName: "premium-ssd"
+      resources:
+        requests: { cpu: "100m", memory: "256Mi" }
+        limits:   { cpu: "1",    memory: "512Mi" }
+      podAntiAffinity: hard
+      securityContext:
+        fsGroup: 65534
+        runAsNonRoot: true
+        runAsUser: 65534
+
+    # Example routing to Slack/PagerDuty. Replace placeholders and uncomment.
+    # config:
+    #   route:
+    #     receiver: "slack"
+    #     group_by: ["alertname","namespace"]
+    #     group_wait: 30s
+    #     group_interval: 5m
+    #     repeat_interval: 12h
+    #     routes:
+    #       - receiver: "pagerduty"
+    #         matchers: ["severity = critical"]
+    #   receivers:
+    #     - name: "slack"
+    #       slack_configs:
+    #         - api_url: $SLACK_WEBHOOK  # mounted via env/secret using AlertmanagerConfig CR if preferred
+    #           channel: "#alerts"
+    #           send_resolved: true
+    #     - name: "pagerduty"
+    #       pagerduty_configs:
+    #         - routing_key: $PAGERDUTY_KEY
+    #
+    # For production secrets, prefer AlertmanagerConfig CRs per-namespace.
+
+  #######################################################################
+  # Prometheus
+  #######################################################################
+  prometheus:
+    enabled: true
+    ingress:
+      enabled: false
+      # className: "nginx"
+      # hosts: ["prometheus.example.com"]
+      # tls:
+      #   - hosts: ["prometheus.example.com"]
+      #     secretName: prometheus-tls
+
+    prometheusSpec:
+      replicas: 2
+      enableAdminAPI: false
+      retention: 15d
+      retentionSize: "70%" # ensure disks don't fill; Prometheus will GC
+      walCompression: true
+      ruleNamespaceSelector: {}
+      ruleSelector: {}
+
+      # Discover ServiceMonitors/PodMonitors across all namespaces (simplifies multi-chart setups).
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      serviceMonitorSelector: {}
+      serviceMonitorNamespaceSelector: {}
+      podMonitorSelector: {}
+      podMonitorNamespaceSelector: {}
+
+      # Pick up any Probes CRs
+      probeSelector: {}
+      probeNamespaceSelector: {}
+
+      externalLabels:
+        cluster: "{{ .Values.global.cluster }}"
+        environment: "{{ .Values.global.environment }}"
+
+      # Storage: 1 Prometheus PVC per replica
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 100Gi
+            # storageClassName: "premium-ssd"
+
+      # Resources tuned for medium clusters; adjust for cardinality.
+      resources:
+        requests: { cpu: "1000m", memory: "4Gi" }
+        limits:   { cpu: "4",     memory: "12Gi" }
+
+      # Scrape additional (static/file_sd) configs via Secret if needed.
+      additionalScrapeConfigsSecret:
+        enabled: false
+        name: ""
+        key: additional-scrape-configs.yaml
+
+      # Remote write (Thanos Receive, Cortex/Mimir, VictoriaMetrics etc.)
+      remoteWrite: []
+      # - url: https://mimir.example.com/api/v1/push
+      #   queueConfig:
+      #     maxSamplesPerSend: 10000
+      #     capacity: 20000
+      #   writeRelabelConfigs: []
+
+      # Optional Thanos sidecar (if using Thanos). Keep disabled by default here.
+      thanos:
+        create: false
+        objectStorageConfig:
+          existingSecret: "" # e.g., thanos-objstore
+          key: objstore.yml
+
+      # secure defaults
+      securityContext:
+        fsGroup: 65534
+        runAsNonRoot: true
+        runAsUser: 65534
+
+  #######################################################################
+  # Grafana
+  #######################################################################
+  grafana:
+    enabled: true
+
+    # Use a pre-created secret for admin credentials in prod
+    admin:
+      existingSecret: grafana-admin
+      userKey: admin-user
+      passwordKey: admin-password
+
+    # Persist dashboards & plugins
+    persistence:
+      enabled: true
+      type: pvc
+      accessModes: ["ReadWriteOnce"]
+      size: 10Gi
+      # storageClassName: "premium-ssd"
+
+    # Expose Grafana (optional)
+    ingress:
+      enabled: false
+      # className: "nginx"
+      # hosts: ["grafana.example.com"]
+      # tls:
+      #   - secretName: grafana-tls
+      #     hosts: ["grafana.example.com"]
+
+    # Lock down
+    env:
+      GF_SECURITY_ALLOW_EMBEDDING: "false"
+      GF_SECURITY_COOKIE_SAMESITE: "strict"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_BASIC_ENABLED: "true"
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_USERS_DEFAULT_THEME: "light"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+
+    # Pre-provision Prometheus as default datasource (chart auto-adds it)
+    additionalDataSources:
+      # Loki (optional; if you deploy Loki separately)
+      # - name: Loki
+      #   type: loki
+      #   access: proxy
+      #   url: http://loki-gateway.monitoring.svc.cluster.local
+      #   isDefault: false
+      # Tempo (optional; traces)
+      # - name: Tempo
+      #   type: tempo
+      #   access: proxy
+      #   url: http://tempo-query-frontend.monitoring.svc.cluster.local
+      #   isDefault: false
+
+    # Dashboards (community + custom)
+    defaultDashboardsEnabled: true
+    sidecar:
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+        folder: /var/lib/grafana/dashboards
+      datasources:
+        enabled: true
+
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits:   { cpu: "1",    memory: "1Gi" }
+
+    serviceMonitor:
+      enabled: true
+
+  #######################################################################
+  # kube-state-metrics
+  #######################################################################
+  kube-state-metrics:
+    enabled: true
+    podSecurityPolicy:
+      enabled: false
+    resources:
+      requests: { cpu: "50m", memory: "128Mi" }
+      limits:   { cpu: "500m", memory: "512Mi" }
+    prometheus:
+      monitor:
+        enabled: true
+
+  #######################################################################
+  # node-exporter
+  #######################################################################
+  nodeExporter:
+    enabled: true
+    hostNetwork: false
+    resources:
+      requests: { cpu: "50m", memory: "64Mi" }
+      limits:   { cpu: "200m", memory: "256Mi" }
+    tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "node-role.kubernetes.io/master"
+        operator: "Exists"
+        effect: "NoSchedule"
+    serviceMonitor:
+      enabled: true
+
+  #######################################################################
+  # kubelet & cAdvisor scraping
+  #######################################################################
+  kubelet:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      cAdvisor: true
+      probes: true
+      # Secure TLS where supported
+      metricRelabelings: []
+      relabelings: []
+
+  #######################################################################
+  # NetworkPolicy (lock down components)
+  #######################################################################
+  networkPolicy:
+    enabled: true
+    allowMonitoringNamespace: true
+    flavor: kubernetes
+    # Additional allowed namespaces for Grafana/Prometheus UI access (ClusterIP)
+    extraIngress:
+      grafana:
+        enabled: false
+        fromNamespaces: []
+      prometheus:
+        enabled: false
+        fromNamespaces: []
+
+  #######################################################################
+  # PodDisruptionBudgets for HA
+  #######################################################################
+  prometheus-pushgateway:
+    enabled: false
+
+  prometheusOperator-admissionWebhooks:
+    patch:
+      podDisruptionBudget:
+        enabled: true
+        minAvailable: 1
+
+  kubeControllerManager:
+    enabled: true
+    service:
+      enabled: true
+      port: 10257
+      targetPort: 10257
+      selector:
+        component: kube-controller-manager
+    serviceMonitor:
+      enabled: true
+      https: true
+
+  kubeScheduler:
+    enabled: true
+    service:
+      enabled: true
+      port: 10259
+      targetPort: 10259
+      selector:
+        component: kube-scheduler
+    serviceMonitor:
+      enabled: true
+      https: true
+
+  #######################################################################
+  # RBAC
+  #######################################################################
+  rbac:
+    create: true
+
+  #######################################################################
+  # ServiceMonitors/PodMonitors labels – keep empty to scrape all
+  #######################################################################
+  commonLabels:
+    app.kubernetes.io/managed-by: "helm"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# prometheus-adapter – expose Custom/External Metrics API for HPA
+# Docs: https://github.com/prometheus-community/helm-charts/tree/main/charts/prometheus-adapter
+# ──────────────────────────────────────────────────────────────────────────────
+prometheusAdapter:
+  rules:
+    default: true
+    # Custom resource metrics (per-pod / per-ns CPU, memory already from metrics-server; here examples for app metrics)
+    custom:
+      - seriesQuery: '{__name__=~"http_requests_total|http_requests:rate5m|request_duration_seconds_count"}'
+        resources:
+          overrides:
+            namespace: { resource: "namespace" }
+            pod:       { resource: "pod" }
+        name:
+          matches: "^(.*)_total"
+          as: "${1}"
+        metricsQuery: |
+          sum by (namespace, pod) (rate(<<.Series>>{<<.LabelMatchers>>}[5m]))
+      - seriesQuery: 'queue_jobs_ready'
+        resources:
+          overrides:
+            namespace: { resource: "namespace" }
+        name:
+          as: "queue_jobs_ready"
+        metricsQuery: |
+          sum by (namespace) (queue_jobs_ready{<<.LabelMatchers>>})
+
+    # External metrics (cluster-scoped, e.g., SQS lag exported to Prometheus, Redis queue depth, etc.)
+    external:
+      - seriesQuery: 'redis_stream_pending_messages'
+        resources:
+          template: <<.Resource>>
+        name:
+          as: "redis_stream_pending_messages"
+        metricsQuery: |
+          sum(redis_stream_pending_messages{<<.LabelMatchers>>})
+      - seriesQuery: 'minio_bucket_size_bytes'
+        resources:
+          template: <<.Resource>>
+        name:
+          as: "minio_bucket_size_bytes"
+        metricsQuery: |
+          sum by (bucket) (minio_bucket_size_bytes{<<.LabelMatchers>>})
+
+  metricsRelistInterval: 1m
+  logLevel: 2
+  prometheus:
+    url: http://prometheus-operated:9090
+    port: 9090
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpful notes for cross-chart discovery:
+# • Your app chart already defines a ServiceMonitor (apps/web). With the
+#   selectors here left empty, Prometheus will discover it automatically.
+# • If you want to constrain discovery, label your app ServiceMonitor(s) e.g.:
+#     metadata:
+#       labels:
+#         monitoring: "enabled"
+#   then set:
+#     kubePrometheusStack.prometheus.prometheusSpec.serviceMonitorSelector:
+#       matchLabels: { monitoring: "enabled" }
+# • For SLOs, use recording rules in a separate Rules CR and let this stack pick
+#   it up via the global selectors above.
+# • Prefer AlertmanagerConfig CRs per-namespace for secret receivers.
+# ──────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,58 @@
+# infra/helm/charts/postgres/Chart.yaml
+apiVersion: v2
+name: postgres
+description: >
+  Production-grade PostgreSQL chart wrapper for the Bowdoin Marketplace stack.
+  This chart pins a vetted upstream PostgreSQL distribution and exposes sane,
+  secure defaults via our values.yaml. Optional Prometheus exporter included.
+
+type: application
+
+# Bump when you change this chart (semver).
+version: 0.1.0
+
+# Upstream app version (visible in UIs only).
+appVersion: "16.4.0"
+
+kubeVersion: ">=1.25.0-0"
+
+keywords:
+  - postgres
+  - postgresql
+  - database
+  - stateful
+  - bowdoin-marketplace
+
+home: https://github.com/your-org/bowdoin-marketplace
+sources:
+  - https://github.com/bitnami/charts/tree/main/bitnami/postgresql
+  - https://github.com/prometheus-community/helm-charts/tree/main/charts/prometheus-postgres-exporter
+
+icon: https://raw.githubusercontent.com/bitnami/containers/main/bitnami/postgresql/logo.png
+
+maintainers:
+  - name: Platform Team
+    email: platform@your-org.example
+    url: https://your-org.example
+
+annotations:
+  artifacthub.io/prerelease: "false"
+  artifacthub.io/changes: |
+    - Initial release of Postgres umbrella chart wrapper.
+
+# We wrap upstream charts as dependencies to keep our templates minimal and focused
+# on platform conventions. Values are passed through via `values.yaml` conditionally.
+dependencies:
+  # Primary PostgreSQL (single-primary, HA via streaming replication).
+  - name: postgresql
+    version: 15.5.7       # Pin to a specific Bitnami chart version tested by the platform
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
+
+  # Optional: dedicated Prometheus exporter (if you prefer it separate from Bitnami's built-in)
+  # NOTE: Bitnami `postgresql` chart already supports `metrics.enabled` with a built-in exporter.
+  # Enable exactly one of: `postgresql.metrics.enabled` (built-in) OR `monitoring.exporter.enabled` (this dep).
+  - name: prometheus-postgres-exporter
+    version: 6.3.0
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: monitoring.exporter.enabled

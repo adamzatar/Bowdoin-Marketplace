@@ -1,0 +1,61 @@
+# .editorconfig
+# Top-level EditorConfig: helps keep consistent coding styles across IDEs/editors
+root = true
+
+# Global defaults
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Source code (TypeScript / JavaScript)
+[*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}]
+indent_style = space
+indent_size = 2
+
+# JSON (package.json, tsconfig, etc.)
+[*.{json,jsonc}]
+indent_style = space
+indent_size = 2
+
+# YAML / YML (CI, Helm charts, etc.)
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+# Markdown and MDX (preserve intentional double-space line breaks)
+[*.{md,mdx}]
+trim_trailing_whitespace = false
+insert_final_newline = true
+
+# Shell scripts
+[*.{sh,bash}]
+indent_style = space
+indent_size = 2
+
+# Dockerfiles
+[Dockerfile*]
+indent_style = space
+indent_size = 2
+
+# Makefile requires tabs
+[Makefile]
+indent_style = tab
+
+# SVG / XML
+[*.{svg,xml}]
+indent_style = space
+indent_size = 2
+
+# Snapshots (often long lines)
+[*.snap]
+trim_trailing_whitespace = false
+insert_final_newline = true
+
+# Env files (keep as-is but ensure LF/newline)
+[*.env]
+end_of_line = lf
+insert_final_newline = true

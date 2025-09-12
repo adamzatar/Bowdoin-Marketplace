@@ -1,0 +1,226 @@
+version: "3.9"
+
+# docker-compose.yml
+#
+# Local production-like stack for Bowdoin Marketplace.
+# Provides: Postgres, Redis, MinIO (S3-compatible), Mailpit (SMTP testing),
+# the Next.js web app, and optional worker & one-off jobs.
+#
+# Usage:
+#   # 1) Prepare environment
+#   cp packages/config/.env.example .env
+#   # fill required secrets (NEXTAUTH_SECRET, SESSION_SECRET, JWT_SECRET, etc.)
+#
+#   # 2) Start core infra + app
+#   docker compose up -d postgres redis minio mailpit
+#   docker compose up --build web
+#
+#   # 3) Run DB migration (one-off)
+#   docker compose run --rm migrate
+#
+#   # (optional) Start background worker(s)
+#   docker compose --profile workers up -d worker-image
+#
+#   # View logs
+#   docker compose logs -f web
+#
+# NOTE:
+# - This file assumes your app image is built by apps/web/Dockerfile.
+# - Secrets are read from .env (NOT committed). See packages/config/.env.example.
+
+x-common-env: &common-env
+  # Pull from your .env (compose automatically reads ".env" at project root)
+  # You can also explicitly set env_file: ["./.env"] per service if preferred.
+  NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+  NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-changeme}
+
+  # Postgres
+  POSTGRES_USER: ${POSTGRES_USER:-postgres}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+  POSTGRES_DB: ${POSTGRES_DB:-bowdoin}
+  DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-bowdoin}?sslmode=disable}
+
+  # Redis
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+
+  # Object storage (MinIO for local/dev)
+  STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-http://minio:9000}
+  STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
+  STORAGE_BUCKET: ${STORAGE_BUCKET:-uploads}
+  STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-minioadmin}
+  STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:-minioadmin}
+  STORAGE_USE_PATH_STYLE: ${STORAGE_USE_PATH_STYLE:-true}
+
+  # Email (Mailpit for local/dev)
+  SMTP_HOST: ${SMTP_HOST:-mailpit}
+  SMTP_PORT: ${SMTP_PORT:-1025}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASS: ${SMTP_PASS:-}
+  EMAIL_FROM: ${EMAIL_FROM:-"no-reply@local.test"}
+
+  # Telemetry (optional OTLP endpoint)
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+  # Node / Next.js
+  NODE_ENV: ${NODE_ENV:-production}
+
+x-common-health: &healthy
+  interval: 5s
+  timeout: 3s
+  retries: 20
+  start_period: 10s
+
+services:
+  # --- Databases & Infra ---
+
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-bowdoin}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./packages/db/prisma/sql/fts_triggers.sql:/docker-entrypoint-initdb.d/20_fts_triggers.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-bowdoin}"]
+      <<: *healthy
+    ports:
+      - "5433:5432"  # expose to host for local tooling
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      <<: *healthy
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2024-07-26T18-07-38Z
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${STORAGE_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${STORAGE_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    ports:
+      - "9000:9000"  # S3 API
+      - "9001:9001"  # Console
+
+  # Optional SMTP sink for local testing; safe to disable in prod
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8025/"]  # UI reachable
+      <<: *healthy
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # Web UI
+
+  # --- App & Jobs ---
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      # If your Dockerfile supports targets:
+      # target: production
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      # NextAuth providers & public runtime config can also live here.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      mailpit:
+        condition: service_started
+    # If your app exposes port 3000
+    ports:
+      - "3000:3000"
+    healthcheck:
+      # Uses your healthz endpoint (already implemented)
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/healthz || exit 1"]
+      <<: *healthy
+
+  # One-off migration job (idempotent). Runs and exits.
+  migrate:
+    image: node:20-alpine
+    profiles: ["ops"]
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace:rw
+    environment:
+      <<: *common-env
+    # Use your provided script; it calls pnpm & ts scripts inside the monorepo.
+    entrypoint: ["/bin/sh", "-lc"]
+    command: >
+      "corepack enable &&
+       corepack prepare pnpm@latest --activate &&
+       pnpm i --frozen-lockfile &&
+       bash scripts/migrate.sh"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Optional seed job
+  seed:
+    image: node:20-alpine
+    profiles: ["ops"]
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace:rw
+    environment:
+      <<: *common-env
+    entrypoint: ["/bin/sh", "-lc"]
+    command: >
+      "corepack enable &&
+       corepack prepare pnpm@latest --activate &&
+       pnpm i --frozen-lockfile &&
+       bash scripts/seed.sh"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Optional background worker that processes image jobs from the queue.
+  # Enabled via: docker compose --profile workers up -d worker-image
+  worker-image:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      # target: production
+    profiles: ["workers"]
+    restart: unless-stopped
+    command: ["node", "--enable-source-maps", "/app/worker/image-processor.js"]
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+# --- Named Volumes ---
+volumes:
+  pg_data:
+  redis_data:
+  minio_data:

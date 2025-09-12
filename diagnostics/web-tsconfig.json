@@ -1,0 +1,95 @@
+{
+    "compilerOptions": {
+        "target": "es2022",
+        "lib": [
+            "es2022",
+            "dom",
+            "dom.iterable"
+        ],
+        "module": "esnext",
+        "moduleResolution": "bundler",
+        "moduleDetection": "force",
+        "verbatimModuleSyntax": true,
+        "resolveJsonModule": true,
+        "allowSyntheticDefaultImports": true,
+        "esModuleInterop": true,
+        "forceConsistentCasingInFileNames": true,
+        "strict": true,
+        "noUncheckedIndexedAccess": true,
+        "exactOptionalPropertyTypes": true,
+        "noImplicitOverride": true,
+        "useUnknownInCatchVariables": true,
+        "skipLibCheck": true,
+        "checkJs": false,
+        "noEmit": true,
+        "baseUrl": "./",
+        "paths": {
+            "@/*": [
+                "*"
+            ]
+        },
+        "types": [
+            "node"
+        ],
+        "tsBuildInfoFile": "../../.tsbuildinfo",
+        "isolatedModules": true,
+        "resolvePackageJsonExports": true,
+        "resolvePackageJsonImports": true,
+        "preserveConstEnums": true,
+        "useDefineForClassFields": true,
+        "noImplicitAny": true,
+        "noImplicitThis": true,
+        "strictNullChecks": true,
+        "strictFunctionTypes": true,
+        "strictBindCallApply": true,
+        "strictPropertyInitialization": true,
+        "strictBuiltinIteratorReturn": true,
+        "alwaysStrict": true
+    },
+    "files": [
+        "./middleware.ts",
+        "./app/api/admin/listings/[id]/remove/route.ts",
+        "./app/api/admin/reports/route.ts",
+        "./app/api/admin/users/[id]/ban/route.ts",
+        "./app/api/auth/[...nextauth]/route.ts",
+        "./app/api/healthz/route.ts",
+        "./app/api/listings/route.ts",
+        "./app/api/listings/[id]/route.ts",
+        "./app/api/listings/[id]/mark-sold/route.ts",
+        "./app/api/listings/search/route.ts",
+        "./app/api/messages/threads/route.ts",
+        "./app/api/messages/threads/[id]/route.ts",
+        "./app/api/messages/threads/[id]/messages/route.ts",
+        "./app/api/openapi/route.ts",
+        "./app/api/readyz/route.ts",
+        "./app/api/upload/presign/route.ts",
+        "./app/api/users/affiliation/route.ts",
+        "./app/api/users/me/route.ts",
+        "./app/api/users/verification/confirm/route.ts",
+        "./app/api/users/verification/request/route.ts",
+        "./src/middleware/csp.ts",
+        "./src/middleware/cspHeaders.ts",
+        "./src/server/context.ts",
+        "./src/server/rateLimit.ts",
+        "./src/server/validators.ts",
+        "./src/server/withAuth.ts",
+        "./src/server/handlers/audit.ts",
+        "./src/server/handlers/errorHandler.ts",
+        "./worker/image-processor.ts"
+    ],
+    "include": [
+        "**/*.ts",
+        "**/*.tsx",
+        "**/*.mts",
+        "**/*.cts",
+        "next-env.d.ts"
+    ],
+    "exclude": [
+        "../../node_modules",
+        "../../dist",
+        "../../.next",
+        "../../coverage",
+        "../../**/.turbo",
+        "../../**/.cache"
+    ]
+}

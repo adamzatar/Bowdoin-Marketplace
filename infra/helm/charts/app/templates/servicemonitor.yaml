@@ -1,0 +1,139 @@
+# infra/helm/charts/app/templates/servicemonitor.yaml
+{{- /*
+ServiceMonitor for Prometheus Operator (kube-prometheus-stack).
+Scrapes metrics from the app Service when `.Values.monitoring.enabled` is true.
+
+Key features
+- Selects the Service created by this chart (labels must match).
+- Scrape interval/timeout, scheme, port/path, sample & label limits.
+- Optional TLS/bearer/mtls.
+- Optional additional relabelings & metricRelabelings.
+- Works with Stakater Reloader via label changes to the Service/Endpoints.
+
+See values.yaml under `.Values.monitoring.serviceMonitor` for tunables.
+*/ -}}
+{{- if and .Values.monitoring.enabled .Values.monitoring.serviceMonitor.enabled }}
+
+{{- $appName := default .Chart.Name .Values.app.name -}}
+{{- $component := default "web" .Values.app.component -}}
+{{- $sm := .Values.monitoring.serviceMonitor -}}
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ printf "%s-%s" (include "app.fullname" . | default (printf "%s-%s" .Release.Name .Chart.Name)) "sm" | trunc 63 | trimSuffix "-" }}
+  namespace: {{ default .Release.Namespace $sm.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: {{ $component | quote }}
+    app.kubernetes.io/part-of: bowdoin-marketplace
+    helm.sh/chart: {{ printf "%s-%s" .Chart.Name (.Chart.Version | replace "+" "_") | quote }}
+    app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+    {{- /* kube-prometheus-stack often matches on this label ("release") */}}
+    {{- if $sm.releaseLabel }}
+    release: {{ $sm.releaseLabel | quote }}
+    {{- end }}
+    {{- with $sm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    {{- with $sm.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- /* Namespace selection:
+        - If `namespaceSelector` provided, use it (allows cross-namespace scraping).
+        - Else, default to this release namespace. */}}
+  {{- if $sm.namespaceSelector }}
+  namespaceSelector:
+    {{- toYaml $sm.namespaceSelector | nindent 4 }}
+  {{- else }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  {{- end }}
+  selector:
+    matchLabels:
+      # Must match Service labels in templates/service.yaml
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: {{ $component | quote }}
+      metrics.exposed: "true"
+  endpoints:
+    - port: {{ $sm.port | default "http-metrics" | quote }}
+      {{- with $sm.targetPort }} # override numeric port if you don't use a named port
+      targetPort: {{ . }}
+      {{- end }}
+      path: {{ $sm.path | default "/metrics" | quote }}
+      scheme: {{ $sm.scheme | default "http" | quote }}
+      interval: {{ $sm.interval | default "30s" | quote }}
+      scrapeTimeout: {{ $sm.scrapeTimeout | default "10s" | quote }}
+      honorLabels: {{ $sm.honorLabels | default false }}
+      {{- if $sm.proxyUrl }}
+      proxyUrl: {{ $sm.proxyUrl | quote }}
+      {{- end }}
+      {{- if $sm.params }}
+      params:
+        {{- toYaml $sm.params | nindent 8 }}
+      {{- end }}
+      {{- if $sm.basicAuth }}
+      basicAuth:
+        {{- toYaml $sm.basicAuth | nindent 8 }}
+      {{- end }}
+      {{- if $sm.bearerTokenSecret }}
+      bearerTokenSecret:
+        {{- toYaml $sm.bearerTokenSecret | nindent 8 }}
+      {{- end }}
+      {{- if $sm.tlsConfig }}
+      tlsConfig:
+        {{- /* Example:
+              insecureSkipVerify: false
+              serverName: metrics.my.svc
+              ca:
+                secret:
+                  name: my-ca
+                  key: ca.crt
+              cert:
+                secret:
+                  name: mtls-cert
+                  key: tls.crt
+              keySecret:
+                name: mtls-cert
+                key: tls.key
+        */}}
+        {{- toYaml $sm.tlsConfig | nindent 8 }}
+      {{- end }}
+      {{- if $sm.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml $sm.metricRelabelings | nindent 8 }}
+      {{- end }}
+      {{- if $sm.relabelings }}
+      relabelings:
+        {{- toYaml $sm.relabelings | nindent 8 }}
+      {{- end }}
+  {{- if $sm.podTargetLabels }}
+  podTargetLabels:
+    {{- toYaml $sm.podTargetLabels | nindent 4 }}
+  {{- end }}
+  {{- if $sm.targetLabels }}
+  targetLabels:
+    {{- toYaml $sm.targetLabels | nindent 4 }}
+  {{- end }}
+  {{- if $sm.sampleLimit }}
+  sampleLimit: {{ $sm.sampleLimit }}
+  {{- end }}
+  {{- if $sm.targetLimit }}
+  targetLimit: {{ $sm.targetLimit }}
+  {{- end }}
+  {{- if $sm.labelLimit }}
+  labelLimit: {{ $sm.labelLimit }}
+  {{- end }}
+  {{- if $sm.labelNameLengthLimit }}
+  labelNameLengthLimit: {{ $sm.labelNameLengthLimit }}
+  {{- end }}
+  {{- if $sm.labelValueLengthLimit }}
+  labelValueLengthLimit: {{ $sm.labelValueLengthLimit }}
+  {{- end }}
+
+{{- end }}

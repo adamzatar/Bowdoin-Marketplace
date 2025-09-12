@@ -1,0 +1,44 @@
+{{- /*
+Prometheus Stack – Namespace manifest
+Creates the target namespace when you want Helm to manage it.
+Safe-by-default: sets Pod Security Admission labels and carries through custom labels/annotations.
+
+Usage (values.yaml):
+namespace:
+  create: true
+  name: monitoring
+  labels:
+    owner: platform
+  annotations:
+    linkerd.io/inject: "disabled"
+*/ -}}
+{{- $ns := (default "monitoring" .Values.namespace.name) -}}
+{{- if and .Values.namespace.create (ne .Release.Namespace $ns) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns | quote }}
+  labels:
+    kubernetes.io/metadata.name: {{ $ns | quote }}
+    app.kubernetes.io/name: "prometheus-stack"
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+    app.kubernetes.io/managed-by: "Helm"
+    app.kubernetes.io/part-of: "observability"
+    app.kubernetes.io/version: {{ .Chart.AppVersion | default .Chart.Version | quote }}
+    environment: {{ .Values.global.environment | default "prod" | quote }}
+    cluster: {{ .Values.global.cluster | default "primary" | quote }}
+    # Pod Security Admission — baseline by default; tighten/loosen if needed.
+    pod-security.kubernetes.io/enforce: {{ .Values.namespace.podSecurity.enforce | default "baseline" | quote }}
+    pod-security.kubernetes.io/audit:   {{ .Values.namespace.podSecurity.audit   | default "restricted" | quote }}
+    pod-security.kubernetes.io/warn:    {{ .Values.namespace.podSecurity.warn    | default "restricted" | quote }}
+    {{- with .Values.namespace.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    # Example: disable sidecar injection for infra namespace (override via values)
+    {{- if hasKey .Values.namespace "annotations" }}
+    {{- toYaml .Values.namespace.annotations | nindent 4 }}
+    {{- else }}
+    {}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,138 @@
+{
+  "name": "@bowdoin/auth",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Authentication package for Bowdoin Marketplace (TOTP, sessions, OAuth, passkeys, and community vs Bowdoin account handling).",
+  "keywords": [
+    "auth",
+    "authentication",
+    "totp",
+    "passkeys",
+    "sessions",
+    "oauth",
+    "bowdoin",
+    "marketplace"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "clean": "rimraf dist",
+    "build": "tsup src/index.ts src/nextauth.ts src/rbac.ts src/rbac/affiliation.ts src/utils/email-token-store.ts src/providers/email.ts --format esm,cjs --dts --out-dir dist --external @bowdoin/email --external @bowdoin/email/* --external @bowdoin/rate-limit --external @bowdoin/rate-limit/*",    "dev": "tsup src/index.ts src/nextauth.ts src/utils/email-token-store.ts src/rbac/affiliation.ts src/providers/email.ts --format esm,cjs --watch --dts --out-dir dist",
+    "lint": "eslint 'src/**/*.{ts,tsx}'",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "check-types": "tsc --noEmit"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./nextauth": {
+      "types": "./dist/nextauth.d.ts",
+      "default": "./dist/nextauth.js"
+    },
+    "./utils/email-token-store": {
+      "types": "./dist/utils/email-token-store.d.ts",
+      "default": "./dist/utils/email-token-store.js"
+    },
+    "./rbac/affiliation": {
+      "types": "./dist/rbac/affiliation.d.ts",
+      "default": "./dist/rbac/affiliation.js"
+    },
+    "./providers/email": {
+      "types": "./dist/providers/email.d.ts",
+      "default": "./dist/providers/email.js"
+    },
+    "./src/nextauth": {
+      "types": "./dist/nextauth.d.ts",
+      "default": "./dist/nextauth.js"
+    },
+    "./src/utils/email-token-store": {
+      "types": "./dist/utils/email-token-store.d.ts",
+      "default": "./dist/utils/email-token-store.js"
+    },
+    "./src/rbac/affiliation": {
+      "types": "./dist/rbac/affiliation.d.ts",
+      "default": "./dist/rbac/affiliation.js"
+    },
+    "./src/providers/email": {
+      "types": "./dist/providers/email.d.ts",
+      "default": "./dist/providers/email.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "nextauth": [
+        "./dist/nextauth.d.ts"
+      ],
+      "src/nextauth": [
+        "./dist/nextauth.d.ts"
+      ],
+      "utils/email-token-store": [
+        "./dist/utils/email-token-store.d.ts"
+      ],
+      "src/utils/email-token-store": [
+        "./dist/utils/email-token-store.d.ts"
+      ],
+      "rbac/affiliation": [
+        "./dist/rbac/affiliation.d.ts"
+      ],
+      "src/rbac/affiliation": [
+        "./dist/rbac/affiliation.d.ts"
+      ],
+      "providers/email": [
+        "./dist/providers/email.d.ts"
+      ],
+      "src/providers/email": [
+        "./dist/providers/email.d.ts"
+      ],
+      "*": [
+        "./dist/index.d.ts"
+      ]
+    }
+  },
+  "dependencies": {
+    "@bowdoin/email": "workspace:*",
+    "@bowdoin/config": "workspace:*",
+    "@bowdoin/contracts": "workspace:*",
+    "@bowdoin/db": "workspace:*",
+    "@bowdoin/observability": "workspace:*",
+    "@bowdoin/security": "workspace:*",
+    "@bowdoin/utils": "workspace:*",
+    "@next-auth/prisma-adapter": "^1.0.7",
+    "@prisma/client": "^6.0.0",
+    "argon2": "^0.40.1",
+    "jose": "^5.2.0",
+    "next-auth": "^4.24.7",
+    "otpauth": "^9.1.4",
+    "zod": "^3.23.8"
+  },
+  "peerDependencies": {
+    "next-auth": "^4.24.7 || ^5"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/node": "^20.19.13",
+    "eslint": "^9.35.0",
+    "prettier": "^3",
+    "redis": "^4.6.13",
+    "rimraf": "^6.0.1",
+    "tsup": "^8.0.2",
+    "typescript": "^5.9.2",
+    "vitest": "^2.1.2"
+  },
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "publishConfig": {
+    "access": "restricted"
+  }
+}

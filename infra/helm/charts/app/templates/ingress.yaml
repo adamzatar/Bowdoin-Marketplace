@@ -1,0 +1,103 @@
+# infra/helm/charts/app/templates/ingress.yaml
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ default .Chart.Name .Values.app.name | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/part-of: bowdoin-marketplace
+    app.kubernetes.io/component: web
+  annotations:
+    {{- /* Ingress class (nginx/traefik/etc.) */}}
+    {{- if .Values.ingress.className }}
+    kubernetes.io/ingress.class: {{ .Values.ingress.className | quote }}
+    {{- end }}
+    {{- /* TLS via cert-manager if used */}}
+    {{- if .Values.ingress.certManager.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.certManager.clusterIssuer | quote }}
+    {{- end }}
+    {{- if .Values.ingress.certManager.issuer }}
+    cert-manager.io/issuer: {{ .Values.ingress.certManager.issuer | quote }}
+    {{- end }}
+    {{- /* Common hardened nginx settings */}}
+    nginx.ingress.kubernetes.io/ssl-redirect: "{{ default true .Values.ingress.sslRedirect }}"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "{{ default true .Values.ingress.forceSSLRedirect }}"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/proxy-body-size: {{ default "10m" .Values.ingress.proxyBodySize | quote }}
+    nginx.ingress.kubernetes.io/proxy-read-timeout: {{ default "60" .Values.ingress.proxyReadTimeout | quote }}
+    nginx.ingress.kubernetes.io/proxy-send-timeout: {{ default "60" .Values.ingress.proxySendTimeout | quote }}
+    nginx.ingress.kubernetes.io/limit-rps: {{ default "20" .Values.ingress.rateLimit.rps | quote }}
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: {{ default "5" .Values.ingress.rateLimit.burstMultiplier | quote }}
+    nginx.ingress.kubernetes.io/enable-access-log: "{{ default true .Values.ingress.enableAccessLog }}"
+    {{- /* Optional: set HSTS on the edge (app also sets strict headers) */}}
+    nginx.ingress.kubernetes.io/hsts: "{{ default true .Values.ingress.hsts.enabled }}"
+    nginx.ingress.kubernetes.io/hsts-max-age: "{{ default 31536000 .Values.ingress.hsts.maxAge }}"
+    nginx.ingress.kubernetes.io/hsts-include-subdomains: "{{ default false .Values.ingress.hsts.includeSubdomains }}"
+    nginx.ingress.kubernetes.io/hsts-preload: "{{ default false .Values.ingress.hsts.preload }}"
+    {{- /* Optional WAF knobs if your controller has ModSecurity/OWASP CRS */}}
+    {{- if .Values.ingress.modsecurity.enabled }}
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "{{ default true .Values.ingress.modsecurity.owaspCoreRules }}"
+    {{- end }}
+    {{- /* Merge any extra annotations from values */}}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className | quote }}
+  {{- end }}
+
+  {{- /* TLS entries */}}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - secretName: {{ .secretName | quote }}
+      hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+    {{- end }}
+  {{- end }}
+
+  rules:
+    {{- $svcName := (default .Chart.Name .Values.app.name) -}}
+    {{- $svcPortName := (default "http" .Values.service.portName) -}}
+    {{- $defaultPath := (default "/" .Values.ingress.defaultPath) -}}
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- if .paths }}
+          {{- range .paths }}
+          - path: {{ default $defaultPath .path | quote }}
+            pathType: {{ default "Prefix" .pathType | quote }}
+            backend:
+              service:
+                name: {{ default $svcName (default nil .serviceName) | quote }}
+                {{- if or .servicePort .servicePortNumber }}
+                port:
+                  {{- if .servicePortNumber }}
+                  number: {{ .servicePortNumber }}
+                  {{- else }}
+                  name: {{ .servicePort | quote }}
+                  {{- end }}
+                {{- else }}
+                port:
+                  name: {{ $svcPortName | quote }}
+                {{- end }}
+          {{- end }}
+          {{- else }}
+          - path: {{ $defaultPath | quote }}
+            pathType: "Prefix"
+            backend:
+              service:
+                name: {{ $svcName | quote }}
+                port:
+                  name: {{ $svcPortName | quote }}
+          {{- end }}
+    {{- end }}
+{{- end }}

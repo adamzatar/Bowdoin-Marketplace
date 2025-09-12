@@ -1,0 +1,3 @@
+# .nvmrc
+# Use a stable, actively supported Node.js runtime for consistency across dev, CI, and prod
+v20.11.1

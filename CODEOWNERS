@@ -1,0 +1,56 @@
+# ───────────────────────────────────────────────────────────────
+# Global owners (fallback for any unmatched file)
+# ───────────────────────────────────────────────────────────────
+*       @bowdoin/engineering-leads @bowdoin/devops
+
+# ───────────────────────────────────────────────────────────────
+# Infrastructure
+# ───────────────────────────────────────────────────────────────
+/infra/helm/**            @bowdoin/devops
+/scripts/**               @bowdoin/devops
+/docker-compose.yml       @bowdoin/devops
+/Makefile                 @bowdoin/devops
+/.github/workflows/**     @bowdoin/devops @bowdoin/qa
+
+# ───────────────────────────────────────────────────────────────
+# Core Config & Utils
+# ───────────────────────────────────────────────────────────────
+/packages/config/**       @bowdoin/backend
+/packages/utils/**        @bowdoin/backend
+
+# ───────────────────────────────────────────────────────────────
+# Observability & Security
+# ───────────────────────────────────────────────────────────────
+/packages/observability/** @bowdoin/devops @bowdoin/backend
+/packages/security/**      @bowdoin/backend @bowdoin/devops
+
+# ───────────────────────────────────────────────────────────────
+# Backend Services
+# ───────────────────────────────────────────────────────────────
+/packages/rate-limit/**   @bowdoin/backend
+/packages/db/**           @bowdoin/backend @bowdoin/data
+/packages/storage/**      @bowdoin/backend
+/packages/queue/**        @bowdoin/backend
+/packages/email/**        @bowdoin/backend
+/packages/auth/**         @bowdoin/backend @bowdoin/security
+
+# ───────────────────────────────────────────────────────────────
+# API Contracts
+# ───────────────────────────────────────────────────────────────
+/packages/contracts/**    @bowdoin/backend @bowdoin/frontend
+
+# ───────────────────────────────────────────────────────────────
+# Web Application
+# ───────────────────────────────────────────────────────────────
+/apps/web/**              @bowdoin/frontend @bowdoin/backend
+
+# ───────────────────────────────────────────────────────────────
+# CI/CD & Tooling
+# ───────────────────────────────────────────────────────────────
+/.prettier*               @bowdoin/frontend
+/.editorconfig            @bowdoin/frontend
+/.nvmrc                   @bowdoin/devops
+/.gitignore               @bowdoin/devops
+/tsconfig.base.json       @bowdoin/backend
+/pnpm-workspace.yaml      @bowdoin/backend @bowdoin/devops
+/package.json             @bowdoin/backend

@@ -1,0 +1,88 @@
+{
+  "name": "@bowdoin/observability",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Logging, metrics, tracing, and audit utilities for Bowdoin Marketplace.",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./logger": {
+      "types": "./dist/logger.d.ts",
+      "default": "./dist/logger.js"
+    },
+    "./metrics": {
+      "types": "./dist/metrics.d.ts",
+      "default": "./dist/metrics.js"
+    },
+    "./tracing": {
+      "types": "./dist/tracing.d.ts",
+      "default": "./dist/tracing.js"
+    },
+    "./audit": {
+      "types": "./dist/audit.d.ts",
+      "default": "./dist/audit.js"
+    },
+    "./audit/events": {
+      "types": "./dist/audit/events/index.d.ts",
+      "default": "./dist/audit/events/index.js"
+    },
+    "./audit/events/affiliation": {
+      "types": "./dist/audit/events/affiliation.d.ts",
+      "default": "./dist/audit/events/affiliation.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "clean": "rimraf dist",
+    "build": "pnpm run clean && tsup src/index.ts src/logger.ts src/metrics.ts src/tracing.ts src/audit.ts src/audit/events/index.ts src/audit/events/affiliation.ts --format esm --sourcemap && tsc -p tsconfig.json --emitDeclarationOnly --outDir dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@bowdoin/config": "workspace:*",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/core": "^1.9.0",
+    "@opentelemetry/resources": "^1.28.0",
+    "@opentelemetry/sdk-metrics": "^1.28.0",
+    "@opentelemetry/sdk-trace-base": "^1.28.0",
+    "@opentelemetry/sdk-trace-node": "^1.28.0",
+    "@opentelemetry/semantic-conventions": "^1.23.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.55.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.55.0",
+    "@opentelemetry/instrumentation": "^0.55.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.55.3",
+    "pino": "^9.0.0"
+  },
+  "optionalDependencies": {
+    "pino-pretty": "^11.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.13",
+    "rimraf": "^6.0.1",
+    "tsup": "^8.1.0",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "keywords": [
+    "observability",
+    "logging",
+    "metrics",
+    "tracing",
+    "opentelemetry",
+    "pino"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "restricted"
+  }
+}
