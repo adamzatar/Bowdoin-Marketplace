@@ -154,6 +154,11 @@ export type UpdateListingBody = z.infer<typeof UpdateListingBodySchema>;
 export const UpdateListingResponseSchema = ListingWithSellerSchema;
 export type UpdateListingResponse = z.infer<typeof UpdateListingResponseSchema>;
 
+// Backwards-compatible aliases (legacy naming)
+export const ListingCreateInputZ = CreateListingBodySchema;
+export const ListingUpdateInputZ = UpdateListingBodySchema;
+export const ListingPublicZ = ListingWithSellerSchema;
+
 /* ------------------------------------------------------------------ */
 /* Retrieve / Detail                                                   */
 /* ------------------------------------------------------------------ */

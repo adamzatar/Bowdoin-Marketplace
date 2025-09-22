@@ -1,12 +1,13 @@
 // packages/auth/src/providers/email.ts
 
 import process from "node:process";
-import EmailProvider, { type EmailConfig } from "next-auth/providers/email";
+
 
 import { env } from "@bowdoin/config/env";
 import { sendVerificationEmail } from "@bowdoin/email/sendVerificationEmail";
 import { audit } from "@bowdoin/observability/audit";
 import { logger } from "@bowdoin/observability/logger";
+import EmailProviderImport, { type EmailConfig } from "next-auth/providers/email";
 
 /**
  * Email sign-in (magic link) provider
@@ -15,6 +16,9 @@ import { logger } from "@bowdoin/observability/logger";
  * - Leaves token persistence to the NextAuth adapter (Prisma).
  * - Adds basic telemetry + audit hooks.
  */
+const EmailProvider = (EmailProviderImport as unknown as { default?: typeof EmailProviderImport }).default ??
+  (EmailProviderImport as unknown as typeof EmailProviderImport);
+
 export function emailProvider(): EmailConfig {
   if (!env.EMAIL_FROM) {
     throw new Error("EMAIL_FROM is required for EmailProvider.");
@@ -43,7 +47,7 @@ export function emailProvider(): EmailConfig {
      * `url` is the magic link the user will click.
      */
     async sendVerificationRequest(params) {
-      const { identifier, url, provider, theme } = params;
+      const { identifier, url, provider, theme: _theme } = params;
 
       // Defensive checks & observability
       logger.info(
@@ -57,14 +61,26 @@ export function emailProvider(): EmailConfig {
       );
 
       try {
-        await sendVerificationEmail({
+        const parsedUrl = new URL(url);
+        const token = parsedUrl.searchParams.get('token');
+        if (!token) {
+          throw new Error('NextAuth verification URL missing token parameter');
+        }
+
+        const payload: Parameters<typeof sendVerificationEmail>[0] = {
           to: identifier,
-          magicLink: url,
-          from: provider.from ?? env.EMAIL_FROM,
+          token,
+          verifyBaseUrl: `${parsedUrl.origin}${parsedUrl.pathname}`,
           brandName,
-          supportEmail: env.EMAIL_FROM,
-          theme,
-        });
+        };
+
+        const redirect = parsedUrl.searchParams.get('redirect');
+        if (redirect) payload.redirectPath = redirect;
+
+        const affiliation = parsedUrl.searchParams.get('affiliation');
+        if (affiliation) payload.affiliation = affiliation;
+
+        await sendVerificationEmail(payload);
 
         await audit.emit("auth.email.magiclink.sent", {
           meta: {

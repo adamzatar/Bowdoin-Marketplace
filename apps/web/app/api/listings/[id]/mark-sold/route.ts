@@ -9,6 +9,10 @@
 // - Audited
 // - Contract-safe response shape
 
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 import { ListingPublicZ } from '@bowdoin/contracts/schemas/listings';
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
@@ -19,10 +23,6 @@ import { emitAuditEvent } from '../../../../../src/server/handlers/audit';
 import { jsonError } from '../../../../../src/server/handlers/errorHandler';
 import { rateLimit } from '../../../../../src/server/rateLimit';
 import { requireSession } from '../../../../../src/server/withAuth';
-
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
 
 const IdParamZ = z.object({ id: z.string().uuid() });
 

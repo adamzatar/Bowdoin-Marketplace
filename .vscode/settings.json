@@ -1,5 +1,23 @@
 {
-  "tailwindCSS.experimental.configFile": "apps/web/tailwind.config.cjs",
-  "tailwindCSS.includeLanguages": { "typescriptreact": "html", "javascriptreact": "html" },
-  "tailwindCSS.classAttributes": ["class", "className"]
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "typescript.tsserver.experimental.enableProjectDiagnostics": false,
+  "typescript.preferences.autoImportFileExcludePatterns": ["**/node_modules/**"],
+  "typescript.disableAutomaticTypeAcquisition": true,
+  "javascript.disableAutomaticTypeAcquisition": true,
+  "eslint.workingDirectories": [{ "mode": "auto" }],
+  "eslint.validate": [
+    "javascript",
+    "javascriptreact",
+    "typescript",
+    "typescriptreact"
+  ],
+  "eslint.problems.shortenToSingleLine": true,
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/.pnpm": true
+  },
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/.pnpm/**": true
+  }
 }

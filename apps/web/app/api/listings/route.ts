@@ -10,6 +10,10 @@
 //   - @bowdoin/contracts/schemas/listings -> zod schemas used below
 //   - Local server utils: rateLimit, errorHandler, withAuth, audit
 
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 import { ListingCreateInputZ, ListingPublicZ } from '@bowdoin/contracts/schemas/listings';
 import { prisma } from '@bowdoin/db';
 import { headers } from 'next/headers';
@@ -47,10 +51,6 @@ const noStore = {
   expires: '0',
   vary: 'Cookie',
 };
-
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
 
 /** GET /api/listings */
 export async function GET(req: NextRequest) {

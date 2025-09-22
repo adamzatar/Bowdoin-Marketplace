@@ -169,7 +169,7 @@ function pickCtxMeta<TCtx extends object>(ctx: TCtx): Record<string, unknown> {
 
 export function audited<TCtx extends object = { params?: Record<string, string> }>(
   name: string,
-  opts?: { onSuccess?: (res: Response, ctx: TCtx) => AuditPayload | void },
+  opts?: { onSuccess?: (_res: Response, _ctx: TCtx) => AuditPayload | void }, // prefix args to satisfy no-unused-vars in type context
 ) {
   return (handler: (req: Request, ctx: TCtx) => Promise<Response> | Response) =>
     async (req: Request, ctx: TCtx): Promise<Response> => {

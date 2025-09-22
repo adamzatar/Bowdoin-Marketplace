@@ -29,20 +29,10 @@
       "import": "./dist/csp.js",
       "require": "./dist/csp.cjs"
     },
-    "./csrf": {
-      "types": "./dist/csrf.d.ts",
-      "import": "./dist/csrf.js",
-      "require": "./dist/csrf.cjs"
-    },
     "./headers": {
       "types": "./dist/headers.d.ts",
       "import": "./dist/headers.js",
       "require": "./dist/headers.cjs"
-    },
-    "./rate-limits/community": {
-      "types": "./dist/rate-limits/community.d.ts",
-      "import": "./dist/rate-limits/community.js",
-      "require": "./dist/rate-limits/community.cjs"
     },
     "./package.json": "./package.json"
   },
@@ -53,24 +43,26 @@
     "dist"
   ],
   "dependencies": {
-    "@bowdoin/rate-limit": "workspace:*",
     "@bowdoin/config": "workspace:*",
+    "@bowdoin/rate-limit": "workspace:*",
     "@bowdoin/utils": "workspace:*",
     "undici": "^7.15.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^20.19.13",
-    "eslint": "^9",
+    "@vitest/ui": "2.1.9",
+    "eslint": "^8.57.0",
     "prettier": "^3",
     "rimraf": "^6.0.1",
     "tsup": "^8.1.0",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "vitest": "2.1.9"
   },
   "scripts": {
-    "build": "rimraf dist && tsup src/index.ts src/csp.ts src/csrf.ts src/headers.ts src/rate-limits/community.ts --format esm,cjs --dts --sourcemap",
+    "build": "rimraf dist && tsup src/index.ts src/csp.ts src/headers.ts --format esm,cjs --sourcemap && tsc --project tsconfig.json --emitDeclarationOnly --outDir dist",
     "clean": "rimraf dist",
-    "dev": "tsup src/index.ts src/csp.ts src/csrf.ts src/headers.ts src/rate-limits/community.ts --format esm,cjs --dts --sourcemap --watch",
+    "dev": "tsup src/index.ts src/csp.ts src/headers.ts --format esm,cjs --sourcemap --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
 }

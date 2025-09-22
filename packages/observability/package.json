@@ -16,27 +16,33 @@
       "types": "./dist/logger.d.ts",
       "default": "./dist/logger.js"
     },
-    "./metrics": {
-      "types": "./dist/metrics.d.ts",
-      "default": "./dist/metrics.js"
-    },
     "./tracing": {
       "types": "./dist/tracing.d.ts",
       "default": "./dist/tracing.js"
+    },
+    "./metrics": {
+      "types": "./dist/metrics.d.ts",
+      "default": "./dist/metrics.js"
     },
     "./audit": {
       "types": "./dist/audit.d.ts",
       "default": "./dist/audit.js"
     },
-    "./audit/events": {
-      "types": "./dist/audit/events/index.d.ts",
-      "default": "./dist/audit/events/index.js"
-    },
-    "./audit/events/affiliation": {
-      "types": "./dist/audit/events/affiliation.d.ts",
-      "default": "./dist/audit/events/affiliation.js"
+    "./audit/events/*": {
+      "types": "./dist/audit/events/*.d.ts",
+      "default": "./dist/audit/events/*.js"
     },
     "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "logger": ["dist/logger.d.ts"],
+      "tracing": ["dist/tracing.d.ts"],
+      "metrics": ["dist/metrics.d.ts"],
+      "audit": ["dist/audit.d.ts"],
+      "audit/events/*": ["dist/audit/events/*.d.ts"],
+      "*": ["dist/*"]
+    }
   },
   "files": [
     "dist"
@@ -49,16 +55,16 @@
   "dependencies": {
     "@bowdoin/config": "workspace:*",
     "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.55.3",
     "@opentelemetry/core": "^1.9.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.55.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.55.0",
+    "@opentelemetry/instrumentation": "^0.55.0",
     "@opentelemetry/resources": "^1.28.0",
     "@opentelemetry/sdk-metrics": "^1.28.0",
     "@opentelemetry/sdk-trace-base": "^1.28.0",
     "@opentelemetry/sdk-trace-node": "^1.28.0",
     "@opentelemetry/semantic-conventions": "^1.23.0",
-    "@opentelemetry/exporter-metrics-otlp-http": "^0.55.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.55.0",
-    "@opentelemetry/instrumentation": "^0.55.0",
-    "@opentelemetry/auto-instrumentations-node": "^0.55.3",
     "pino": "^9.0.0"
   },
   "optionalDependencies": {
@@ -66,9 +72,11 @@
   },
   "devDependencies": {
     "@types/node": "^20.19.13",
+    "@vitest/ui": "2.1.9",
     "rimraf": "^6.0.1",
     "tsup": "^8.1.0",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "vitest": "2.1.9"
   },
   "engines": {
     "node": ">=18.18.0"

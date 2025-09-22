@@ -6,9 +6,14 @@
 // - Marks user as community-verified in DB
 // - Emits audit events; rate-limits attempts; no-store caching
 
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 import { EmailTokenStore } from '@bowdoin/auth/utils/email-token-store';
 import { flags } from '@bowdoin/config/flags';
-import { prisma } from '@bowdoin/db'; // assumes prisma export
+import { prisma } from '@bowdoin/db';
+import { Affiliation } from '@prisma/client';
 import { headers } from 'next/headers';
 import { z } from 'zod';
 
@@ -18,10 +23,6 @@ import { emitAuditEvent } from '../../../../../src/server/handlers/audit';
 import { jsonError } from '../../../../../src/server/handlers/errorHandler';
 import { rateLimit } from '../../../../../src/server/rateLimit';
 import { requireSession } from '../../../../../src/server/withAuth';
-
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
 
 function noStore() {
   return {
@@ -107,12 +108,9 @@ export async function POST(req: NextRequest) {
     await prisma.user.update({
       where: { id: session.user.id },
       data: {
-        affiliationVerified: true,
-        // Optional fields if your schema has them:
-        affiliationEmail: payload.email,
-        affiliationVerifiedAt: new Date(),
-      } as any,
-      // ^ casting to any so it won’t break if some fields aren’t present.
+        affiliation: Affiliation.COMMUNITY,
+        communityVerifiedAt: new Date(),
+      },
     });
   } catch (err) {
     // On DB failure, we do NOT re-credit the token (still single-use)

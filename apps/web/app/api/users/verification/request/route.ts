@@ -1,6 +1,10 @@
 // apps/web/app/api/users/verification/request/route.ts
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 import process from 'node:process';
-import { env } from '@bowdoin/config';
+import { env } from '@bowdoin/config/env';
 import { audit } from '@bowdoin/observability/audit';
 import { logger } from '@bowdoin/observability/logger';
 import { getRedisClient } from '@bowdoin/rate-limit/redisClient';
@@ -11,10 +15,6 @@ import { headers } from 'next/headers';
 import { getServerSession } from 'next-auth';
 import { z, type ZodIssue } from 'zod';
 import type { NextRequest } from 'next/server';
-
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
 
 const BodySchema = z
   .object({

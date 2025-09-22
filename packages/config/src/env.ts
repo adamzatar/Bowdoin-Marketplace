@@ -1,3 +1,4 @@
+/* eslint-env node */
 // packages/config/src/env.ts
 import 'dotenv/config';
 import { z } from 'zod';
@@ -57,6 +58,8 @@ const EnvSchema = z.object({
 
   // Email (SMTP defaults; SES supported via EMAIL_PROVIDER=ses)
   EMAIL_FROM: z.string().email(),
+  // Comma-separated domain allowlist; optional. Example: "bowdoin.edu,example.org"
+  ALLOWED_EMAIL_DOMAINS: z.string().optional(),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().int().positive().optional(),
   SMTP_USER: z.string().optional(),
@@ -84,12 +87,18 @@ const EnvSchema = z.object({
   RATE_LIMITS_DISABLED: z.enum(["true", "false"]).optional(),
 });
 
-const parsed = EnvSchema.safeParse(process.env);
+const runtimeGlobal = globalThis as {
+  process?: { env?: Record<string, string | undefined> };
+};
+
+const parsed = EnvSchema.safeParse(runtimeGlobal.process?.env ?? {});
 
 if (!parsed.success) {
   // Print flattened errors for quick CI visibility without dumping all env
-  // eslint-disable-next-line no-console
-  console.error('❌ Invalid environment configuration:', parsed.error.flatten().fieldErrors);
+  globalThis.console?.error?.(
+    '❌ Invalid environment configuration:',
+    parsed.error.flatten().fieldErrors,
+  );
   throw new Error('Invalid environment variables');
 }
 

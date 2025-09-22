@@ -28,7 +28,6 @@
     "baseUrl": ".",
     "paths": {}
   },
-  "files": [],
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",
@@ -42,5 +41,10 @@
     "**/*.spec.ts",
     "**/__tests__/**",
     "**/__mocks__/**"
+  ],
+  "references": [
+    { "path": "../email" },
+    { "path": "../rate-limit" },
+    { "path": "../config/tsconfig.src.json" }
   ]
 }

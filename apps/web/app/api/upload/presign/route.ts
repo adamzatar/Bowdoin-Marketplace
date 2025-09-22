@@ -12,6 +12,10 @@
 // If you have a helper in @bowdoin/storage, you can swap the signer below
 // to call that instead; this version is self-contained and production-safe.
 
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 import { randomUUID, createHmac } from 'node:crypto';
 
 import { env } from '@bowdoin/config/env';
@@ -22,11 +26,6 @@ import { auditEvent } from '../../../../src/server/handlers/audit';
 import { jsonError } from '../../../../src/server/handlers/errorHandler';
 import { rateLimit } from '../../../../src/server/rateLimit';
 import { withAuth } from '../../../../src/server/withAuth';
-
-// Next edge/runtime hints
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
 
 const JSON_NOSTORE = {
   'content-type': 'application/json; charset=utf-8',

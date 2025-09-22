@@ -10,6 +10,10 @@
 // createdAt, listingId?, reportedUserId?, reporterId?) fields. If your field
 // names differ, tweak the `select`/`where`/`data` blocks accordingly.
 
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 import { env } from '@bowdoin/config/env';
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
@@ -169,7 +173,3 @@ export const POST = withAuth(async (req, ctx) => {
     headers: JSON_NOSTORE,
   });
 });
-
-// --------- Optional: disable caching aggressively (already via headers above)
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;

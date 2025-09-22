@@ -17,9 +17,10 @@
  *  APPLY=1 pnpm -w ts-node packages/db/scripts/backfill-affiliation.mts --all
  */
 
-import { PrismaClient, Affiliation } from '@prisma/client';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
+
+import { PrismaClient, Prisma, Affiliation } from '@prisma/client';
 
 type CliOpts = {
   apply: boolean;
@@ -35,7 +36,6 @@ function parseArgs(argv: string[]): CliOpts {
   const opts: CliOpts = {
     apply: process.env.APPLY === '1' || argv.includes('--apply'),
     all: argv.includes('--all'),
-    limit: undefined,
     batchSize: 200,
     sleepMs: 25,
   };
@@ -63,9 +63,9 @@ function parseArgs(argv: string[]): CliOpts {
 
 function inferAffiliation(email: string): Affiliation {
   const domain = email.split('@')[1]?.toLowerCase().trim();
-  if (!domain) return Affiliation.unknown;
-  if (domain === 'bowdoin.edu') return Affiliation.bowdoin_member;
-  return Affiliation.community;
+  if (domain === 'bowdoin.edu') return Affiliation.BOWDOIN;
+  if (!domain) return Affiliation.COMMUNITY;
+  return Affiliation.COMMUNITY;
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -75,54 +75,51 @@ function chunk<T>(arr: T[], size: number): T[][] {
 }
 
 async function selectTargets(opts: CliOpts) {
-  if (opts.all) {
-    return prisma.user.findMany({
-      select: { id: true, email: true, affiliation: true },
-      where: { email: { not: null } },
-      orderBy: { createdAt: 'asc' },
-      take: opts.limit,
-    });
+  const args: Prisma.UserFindManyArgs = {
+    select: { id: true, email: true, affiliation: true },
+    orderBy: { createdAt: 'asc' },
+  };
+
+  if (!opts.all) {
+    args.where = { affiliation: Affiliation.COMMUNITY };
   }
 
-  return prisma.user.findMany({
-    select: { id: true, email: true, affiliation: true },
-    where: {
-      email: { not: null },
-      OR: [{ affiliation: null }, { affiliation: Affiliation.unknown }],
-    },
-    orderBy: { createdAt: 'asc' },
-    take: opts.limit,
-  });
+  if (typeof opts.limit === 'number') {
+    args.take = opts.limit;
+  }
+
+  return prisma.user.findMany(args);
 }
 
 async function writeAffiliation(
   userId: string,
   newAff: Affiliation,
-  oldAff: Affiliation | null,
+  oldAff: Affiliation,
   email: string,
   apply: boolean,
 ) {
   if (!apply) return;
 
-  // Use a transaction so audit log + user update are atomic.
   await prisma.$transaction(async (tx) => {
     await tx.user.update({
       where: { id: userId },
       data: { affiliation: newAff, updatedAt: new Date() },
     });
 
-    // Record an audit log row if table/model exists.
-    // We assume an AuditLog model with fields: id, type, userId, data(Json), createdAt.
+    const auditData: Prisma.JsonObject = {
+      from: oldAff,
+      to: newAff,
+      reason: 'domain_inference',
+      email,
+    };
+
     await tx.auditLog.create({
       data: {
-        type: 'affiliation.backfill',
-        userId: userId,
-        data: {
-          from: oldAff ?? 'null',
-          to: newAff,
-          reason: 'domain_inference',
-          email,
-        } as unknown as any,
+        action: 'affiliation.backfill',
+        entityType: 'User',
+        entityId: userId,
+        actorUserId: userId,
+        metadata: auditData,
       },
     });
   });
@@ -132,8 +129,7 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const targets = await selectTargets(opts);
 
-   
-  console.log(
+  globalThis.console?.log?.(
     `[affiliation/backfill] candidates=${targets.length} apply=${opts.apply} all=${opts.all} limit=${opts.limit ?? '∞'} batch=${opts.batchSize} sleep=${opts.sleepMs}ms`,
   );
 
@@ -142,25 +138,19 @@ async function main() {
 
   const batches = chunk(targets, opts.batchSize);
   for (const [bi, batch] of batches.entries()) {
-     
-    console.log(
+    globalThis.console?.log?.(
       `[affiliation/backfill] processing batch ${bi + 1}/${batches.length} size=${batch.length}`,
     );
 
     for (const u of batch) {
-      const email = u.email!;
-      const inferred = inferAffiliation(email);
-
-      if (inferred === Affiliation.unknown) {
+      const email = u.email;
+      if (!email) {
         skipped++;
-         
-        console.warn(
-          `[affiliation/backfill] skip user=${u.id} email=${email} -> inferred=unknown`,
-        );
         continue;
       }
+      const inferred = inferAffiliation(email);
 
-      if (!opts.all && u.affiliation && u.affiliation !== Affiliation.unknown) {
+      if (!opts.all && u.affiliation !== Affiliation.COMMUNITY) {
         skipped++;
         continue;
       }
@@ -170,8 +160,7 @@ async function main() {
         continue;
       }
 
-       
-      console.log(
+      globalThis.console?.log?.(
         `[affiliation/backfill] user=${u.id} email=${email} from=${u.affiliation ?? 'null'} -> ${inferred}${opts.apply ? '' : ' (dry-run)'}`,
       );
 
@@ -184,8 +173,7 @@ async function main() {
     }
   }
 
-   
-  console.log(
+  globalThis.console?.log?.(
     `[affiliation/backfill] done candidates=${targets.length} updated=${updated} skipped=${skipped} apply=${opts.apply}`,
   );
 }
@@ -193,8 +181,7 @@ async function main() {
 if (import.meta.url === `file://${process.argv[1]}`) {
   main()
     .catch((err) => {
-       
-      console.error('[affiliation/backfill] ERROR', err);
+      globalThis.console?.error?.('[affiliation/backfill] ERROR', err);
       process.exitCode = 1;
     })
     .finally(async () => {

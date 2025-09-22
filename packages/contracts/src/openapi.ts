@@ -1,6 +1,4 @@
 // packages/contracts/src/openapi.ts
-
-// Auth
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
 import {
@@ -8,33 +6,17 @@ import {
   AffiliationPolicyNoteSchema, // this one exists per your error message
 } from './schemas/affiliation';
 import { AuthOkSchema } from './schemas/auth';
+import { ListingIdSchema } from './schemas/listings';
+import { MessageIdSchema } from './schemas/messages';
+
+import type { OpenAPIObject } from 'openapi3-ts/oas31';
+import type { z } from 'zod';
+
+// Affiliation
 
 // Users
 // (If you have user zods, import them explicitly here, e.g. UserSchema)
 // import { UserSchema } from './schemas/users';
-
-// Affiliation
-
-// Health
-// import { HealthOkSchema } from './schemas/health';
-
-// Listings
-import { ListingIdSchema } from './schemas/listings';
-
-// Messages
-import { MessageIdSchema } from './schemas/messages';
-
-// Upload
-// import { UploadInitSchema } from './schemas/upload';
-
-// Admin
-// If admin exports collide with listings, only import distinct names here.
-// import { SomeAdminOnlySchema } from './schemas/admin';
-
-// --- Helpers to convert zod to JSON Schema (optional if you already do this elsewhere)
-
-import type { OpenAPIObject } from 'openapi3-ts/oas31';
-import type { z } from 'zod';
 
 function toSchema(zod: z.ZodTypeAny, name: string) {
   return zodToJsonSchema(zod, { name, target: 'openApi3' });

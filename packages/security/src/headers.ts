@@ -14,9 +14,22 @@
  *   export const headers = async () => nextSecurityHeaders();
  */
 
-import { env } from '@bowdoin/config/env';
-
 import type { Headers as NodeFetchHeaders } from 'undici';
+
+type EnvSource = Record<string, string | undefined>;
+
+const runtimeEnv: EnvSource =
+  (globalThis as { process?: { env?: EnvSource } }).process?.env ?? {};
+
+const stringFromEnv = (key: string, fallback = ''): string => runtimeEnv[key] ?? fallback;
+
+type MutableHeaders = {
+  set(key: string, value: string): void;
+  has?(key: string): boolean;
+};
+
+const isHeadersMutable = (value: unknown): value is MutableHeaders =>
+  typeof value === 'object' && value !== null && typeof (value as MutableHeaders).set === 'function';
 
 /** Structured options for header generation. */
 export interface SecurityHeaderOptions {
@@ -81,19 +94,20 @@ export interface SecurityHeaderOptions {
 }
 
 /** Reasonable defaults for Bowdoin Marketplace. */
-const DEFAULTS: Required<Omit<SecurityHeaderOptions, 'origin' | 'permissionsPolicy' | 'reportingEndpoints'>> =
-  {
-    hsts: env.NODE_ENV === 'production',
-    hstsMaxAge: 15552000, // 180 days
-    hstsIncludeSubDomains: true,
-    hstsPreload: false,
-    coop: 'same-origin-allow-popups', // safer default that won’t break OAuth popups
-    coep: 'unsafe-none', // do not force COEP unless app is audited for it
-    corp: 'same-origin', // default CORP
-    referrerPolicy: 'strict-origin-when-cross-origin',
-    enableReportTo: false,
-    maskPoweredBy: true
-  };
+const DEFAULTS: Required<
+  Omit<SecurityHeaderOptions, 'origin' | 'permissionsPolicy' | 'reportingEndpoints'>
+> = {
+  hsts: stringFromEnv('NODE_ENV', 'development') === 'production',
+  hstsMaxAge: 15552000,
+  hstsIncludeSubDomains: true,
+  hstsPreload: false,
+  coop: 'same-origin-allow-popups',
+  coep: 'unsafe-none',
+  corp: 'same-origin',
+  referrerPolicy: 'strict-origin-when-cross-origin',
+  enableReportTo: false,
+  maskPoweredBy: true,
+};
 
 /** Build the Permissions-Policy header value from a key → allowlist map. */
 function buildPermissionsPolicy(map: NonNullable<SecurityHeaderOptions['permissionsPolicy']>): string {
@@ -119,7 +133,7 @@ function buildReportingEndpoints(map: Record<string, string>): string {
 /** Create a hardened header record. CSP is handled in @bowdoin/security/csp. */
 export function createSecurityHeaders(opts: SecurityHeaderOptions = {}): Record<string, string> {
   const {
-    origin = env.APP_URL || '',
+    origin = stringFromEnv('APP_URL', ''),
     hsts = DEFAULTS.hsts,
     hstsMaxAge = DEFAULTS.hstsMaxAge,
     hstsIncludeSubDomains = DEFAULTS.hstsIncludeSubDomains,
@@ -230,11 +244,13 @@ export function createSecurityHeaders(opts: SecurityHeaderOptions = {}): Record<
   // Minor sanity: avoid obviously wrong origin values if passed accidentally.
   if (origin && !/^https?:\/\//i.test(origin)) {
     // tslint:disable-next-line:no-console
-    console.warn('[security/headers] Provided origin does not look absolute:', origin);
+    globalThis.console?.warn?.('[security/headers] Provided origin does not look absolute:', origin);
   }
 
   return headers;
 }
+
+export const securityHeaders = createSecurityHeaders;
 
 /**
  * Merge security headers into an existing Headers-like object without clobbering
@@ -245,17 +261,15 @@ export function mergeSecurityHeaders<T extends Headers | NodeFetchHeaders | Reco
   options?: SecurityHeaderOptions
 ): T {
   const sec = createSecurityHeaders(options);
-  if (typeof (target as any).set === 'function') {
-    // Headers-like
+  if (isHeadersMutable(target)) {
     for (const [k, v] of Object.entries(sec)) {
-      if (!(target as any).has?.(k)) {
-        (target as any).set(k, v);
-      }
+      const exists = typeof target.has === 'function' ? target.has(k) : false;
+      if (!exists) target.set(k, v);
     }
     return target;
   }
-  // Record
-  return Object.assign({}, sec, target) as T;
+  const merged: Record<string, string> = { ...sec, ...(target as Record<string, string>) };
+  return merged as T;
 }
 
 /**
@@ -290,10 +304,8 @@ export function stripServerHeaders<T extends Headers | NodeFetchHeaders>(h: T): 
     'X-Runtime'
   ];
   for (const k of drop) {
-    try {
-      (h as any).delete?.(k);
-    } catch {
-      // ignore
+    if (typeof (h as { delete?: (key: string) => void }).delete === 'function') {
+      h.delete(k);
     }
   }
   return h;

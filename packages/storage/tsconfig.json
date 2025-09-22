@@ -1,37 +1,43 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "strict": true,
     "target": "ES2022",
+    "lib": ["ES2022"],
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ES2022"],
 
     "rootDir": "src",
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo",
-
     "composite": true,
-    "noEmit": false,
-    "emitDeclarationOnly": false,
+
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
     "inlineSources": true,
-    "stripInternal": true,
 
     "verbatimModuleSyntax": true,
+    "stripInternal": true,
     "exactOptionalPropertyTypes": true,
     "skipLibCheck": true,
+    "useUnknownInCatchVariables": true,
+    "noImplicitOverride": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "noEmit": false,
+    "emitDeclarationOnly": false,
+
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
 
-    "types": ["node", "vitest"]
+    "types": ["node"]
   },
-  "include": ["src/**/*.ts", "src/**/*.mts", "src/**/*.d.ts"],
+  "include": ["src/**/*.ts", "src/**/*.mts", "src/**/*.cts", "src/**/*.d.ts"],
   "exclude": ["dist", "node_modules", "**/*.test.ts", "**/*.spec.ts", "**/__mocks__/**"],
   "references": [
-    { "path": "../config" },
-    { "path": "../utils" },
-    { "path": "../observability" }
+    { "path": "../config/tsconfig.src.json" },
+    { "path": "../utils/tsconfig.json" },
+    { "path": "../observability/tsconfig.json" }
   ]
 }

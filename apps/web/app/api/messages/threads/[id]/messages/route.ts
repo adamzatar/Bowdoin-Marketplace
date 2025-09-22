@@ -11,6 +11,10 @@
 // - Basic content sanitation (trim/strip control chars, max length)
 // - Responses shaped to align with @bowdoin/contracts (validated in dev)
 
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 import { Messages } from '@bowdoin/contracts/schemas/messages';
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
@@ -21,10 +25,6 @@ import { auditEvent } from '../../../../../../src/server/handlers/audit';
 import { jsonError } from '../../../../../../src/server/handlers/errorHandler';
 import { rateLimit } from '../../../../../../src/server/rateLimit';
 import { withAuth } from '../../../../../../src/server/withAuth';
-
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
 
 const JSON_NOSTORE = {
   'content-type': 'application/json; charset=utf-8',

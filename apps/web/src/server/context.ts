@@ -83,15 +83,17 @@ export async function createContext(req: RequestLike): Promise<ServerContext> {
 
   // Optional: start a tracing span for this request
   tracer.startActiveSpan(`route ${method} ${url.pathname}`, (span) => {
-    span.setAttribute('request.id', requestId);
-    span.setAttribute('http.method', method);
-    span.setAttribute('http.target', url.pathname + url.search);
-    if (ip) span.setAttribute('client.ip', ip);
-    span.end(); // we just create a lightweight parent span; child spans can attach later
+    if (isSpanLike(span)) {
+      span.setAttribute('request.id', requestId);
+      span.setAttribute('http.method', method);
+      span.setAttribute('http.target', url.pathname + url.search);
+      if (ip) span.setAttribute('client.ip', ip);
+      span.end();
+    }
   });
 
   // Metric: count inbound requests by route+method
-  metrics.count('http.requests.in', 1, {
+  metrics.counters.httpRequests.add(1, {
     method,
     route: url.pathname,
   });
@@ -142,7 +144,7 @@ export function withContext<H extends (ctx: ServerContext) => Promise<Response> 
       return ctx.withCommonHeaders(res);
     } catch (err) {
       ctx.logger.error({ err }, 'unhandled route error');
-      metrics.count('http.requests.error', 1, { route: ctx.url.pathname });
+      metrics.counters.httpRequestErrors.add(1, { route: ctx.url.pathname });
       return ctx.withCommonHeaders(
         new Response(JSON.stringify({ error: 'internal_error' }), {
           status: 500,
@@ -153,19 +155,41 @@ export function withContext<H extends (ctx: ServerContext) => Promise<Response> 
   };
 }
 
+export const getContext = createContext;
+
 /* ----------------------------- utils ----------------------------------- */
 
+type SpanLike = {
+  setAttribute(key: string, value: unknown): void;
+  recordException(error: unknown): void;
+  end(): void;
+};
+
+function isSpanLike(value: unknown): value is SpanLike {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'setAttribute' in value &&
+    'recordException' in value &&
+    'end' in value &&
+    typeof (value as SpanLike).setAttribute === 'function' &&
+    typeof (value as SpanLike).recordException === 'function' &&
+    typeof (value as SpanLike).end === 'function'
+  );
+}
+
+type WithUrl = { url?: string };
+type WithHeaders = { headers?: Headers };
+
 function toURL(req: RequestLike): URL {
-  // NextRequest has .url already; generic Request does too.
-  // Create a URL instance so we can read pathname/searchParams easily.
-  // @ts-expect-error `url` is present on both NextRequest and Request
-  return new URL(req.url);
+  const maybeUrl = (req as WithUrl).url;
+  const value = typeof maybeUrl === 'string' ? maybeUrl : String((req as Request).url ?? '');
+  return new URL(value);
 }
 
 function getHeader(req: RequestLike, name: string): string | null {
-  // @ts-expect-error both NextRequest and Request expose Headers via .headers
-  const h: Headers | undefined = req.headers;
-  return h?.get?.(name) ?? null;
+  const headersLike = (req as WithHeaders).headers;
+  return headersLike?.get?.(name) ?? null;
 }
 
 function getClientIp(req: RequestLike): string | null {
@@ -192,10 +216,7 @@ function getRequestId(req: RequestLike): string {
 }
 
 function safeUUID(): string {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    // @ts-ignore - randomUUID exists in Node 16.17+ / modern runtimes
-    return crypto.randomUUID();
-  }
-  // Fallback (very rare paths, tests)
+  const webCrypto = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (webCrypto?.randomUUID) return webCrypto.randomUUID();
   return `req_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
 }

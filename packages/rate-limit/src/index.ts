@@ -9,7 +9,6 @@
  *  - Back-compat TokenBucket shim (object with same function references)
  */
 
-import type { RedisClientType } from "redis";
 import {
   consume,
   getState,
@@ -18,6 +17,8 @@ import {
   type TokenBucketConfig,
   type ConsumeResult,
 } from "./tokenBucket";
+
+import type { RedisClientType } from "redis";
 
 // Re-export public surface so both root (.) and subpaths resolve consistently.
 export { getRedisClient } from "./redisClient";
@@ -58,6 +59,3 @@ export const TokenBucket = {
   perSecondConfig,
   toHttpHeaders,
 } as const;
-
-// Optional default export for legacy `import TokenBucket from ...` sites.
-export default TokenBucket;

@@ -24,12 +24,29 @@
  *   return new Response('ok', { headers: new Headers([cspHeader(policy)]) });
  */
 
-import { env } from "@bowdoin/config/env";
-import * as flags from "@bowdoin/config/flags";
-
-
-
 type Origin = string;
+
+type EnvSource = Record<string, string | undefined>;
+
+const runtimeEnv: EnvSource =
+  (globalThis as { process?: { env?: EnvSource } }).process?.env ?? {};
+
+const boolFromEnv = (key: string, fallback = false): boolean => {
+  const raw = runtimeEnv[key];
+  if (raw === undefined) return fallback;
+  const normalized = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "y"].includes(normalized)) return true;
+  if (["0", "false", "no", "n"].includes(normalized)) return false;
+  return fallback;
+};
+
+const stringFromEnv = (key: string, fallback = ""): string => runtimeEnv[key] ?? fallback;
+
+const arrayFromEnv = (key: string): string[] =>
+  stringFromEnv(key)
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
 
 export interface CspBuildOptions {
   /** Nonce for <script> and (optionally) inline styles (Next’s Script/nonce). */
@@ -79,12 +96,11 @@ export interface CspPolicy {
 /** Utilities */
 const uniq = <T,>(arr: T[]) => Array.from(new Set(arr));
 const filterTruthy = <T,>(arr: (T | false | null | undefined)[]) =>
-  (arr.filter(Boolean) as unknown) as T[];
+  arr.filter(Boolean) as T[];
 
 const asOrigin = (urlOrHost: string): string => {
   if (!urlOrHost) return '';
   try {
-    // Accept bare hosts like "example.com" or with scheme
     if (!/^https?:\/\//i.test(urlOrHost)) {
       return `https://${urlOrHost.replace(/\/+$/, '')}`;
     }
@@ -97,66 +113,52 @@ const asOrigin = (urlOrHost: string): string => {
 
 /**
  * Default analytics hosts: include if an analytics domain is configured.
- * If you want a flag-based gate, wire it here using your flags utility.
  */
 const DEFAULT_ANALYTICS: string[] = (() => {
-  const host = process.env.ANALYTICS_DOMAIN || "https://plausible.io";
-  return flags.isEnabled("ENABLE_SEARCH_V2") ? [asOrigin(host)] : [];
+  const host = stringFromEnv('ANALYTICS_DOMAIN', 'https://plausible.io');
+  return boolFromEnv('ENABLE_SEARCH_V2', false) ? [asOrigin(host)] : [];
 })();
 
 const DEFAULT_IMAGE_HOSTS: string[] = [
-  process.env.S3_BUCKET_HOST ? asOrigin(process.env.S3_BUCKET_HOST) : undefined,
-  process.env.NEXT_PUBLIC_IMAGE_HOSTS ? asOrigin(process.env.NEXT_PUBLIC_IMAGE_HOSTS) : undefined,
+  stringFromEnv('S3_BUCKET_HOST') ? asOrigin(stringFromEnv('S3_BUCKET_HOST')) : undefined,
+  ...arrayFromEnv('NEXT_PUBLIC_IMAGE_HOSTS').map(asOrigin),
 ].filter(Boolean) as string[];
+
+const DEFAULT_OKTA_ISSUER = stringFromEnv('OKTA_ISSUER', '');
+const DEFAULT_UPGRADE_INSECURE = stringFromEnv('NODE_ENV', 'development') === 'production';
 
 /** Build a hardened yet practical CSP for Next.js App Router. */
 export function buildCSP({
   nonce,
   allow,
-  oktaIssuer = env.OKTA_ISSUER || '',
+  oktaIssuer = DEFAULT_OKTA_ISSUER,
   imageHosts = DEFAULT_IMAGE_HOSTS,
   analyticsHosts = DEFAULT_ANALYTICS,
-  upgradeInsecure = env.NODE_ENV === 'production',
+  upgradeInsecure = DEFAULT_UPGRADE_INSECURE,
   reportToGroup,
   enableCspReporting = Boolean(reportToGroup),
-  strict
+  strict,
 }: CspBuildOptions = {}): CspPolicy {
   const self = `'self'`;
   const none = `'none'`;
 
   const scriptBase: string[] = [self];
 
-  // Next.js inline scripts will receive the nonce from <Script nonce> or automatic nonce plumbing.
   if (nonce) scriptBase.push(`'nonce-${nonce}'`);
 
-  // Strict-Dynamic (modern hardening): allows scripts loaded by a trusted (nonce’d) script.
   if (strict?.strictDynamic) {
     scriptBase.push(`'strict-dynamic'`);
-    // With strict-dynamic, you don't need to list CDNs; the nonce’d bootstrap governs trust.
-    // Keep https: as a safety valve for backward compat if desired:
     scriptBase.push('https:');
   }
 
-  // Style: Next often injects inline styles (for styled-jsx) unless disabled.
-  // Safe default is to allow 'unsafe-inline'. To harden, set disallowInlineStyles=true and provide nonce’d styles.
-  const styleBase: string[] = [self, strict?.disallowInlineStyles ? '' : `'unsafe-inline'`].filter(Boolean) as string[];
+  const styleBase: string[] = [self];
+  if (!strict?.disallowInlineStyles) styleBase.push(`'unsafe-inline'`);
   if (nonce) styleBase.push(`'nonce-${nonce}'`);
 
-  const imgBase: string[] = [
-    self,
-    'data:',
-    'blob:',
-    ...imageHosts.map(asOrigin)
-  ];
+  const imgBase: string[] = [self, 'data:', 'blob:', ...imageHosts.map(asOrigin)];
 
-  const connectBase: string[] = [
-    self,
-    'https:',
-    'wss:', // Next dev / SSE / real-time
-    ...analyticsHosts.map(asOrigin)
-  ];
+  const connectBase: string[] = [self, 'https:', 'wss:', ...analyticsHosts.map(asOrigin)];
 
-  // Frames: Okta may host pages in its domain for login flows; NextAuth uses redirects (not iframes).
   const frameBase: string[] = filterTruthy([oktaIssuer && asOrigin(oktaIssuer)]);
 
   const workerBase: string[] = [self, 'blob:'];
@@ -165,30 +167,18 @@ export function buildCSP({
 
   const directives: CspPolicy['directives'] = {
     'default-src': [self],
-    // Allow scripts with nonce; avoid unsafe-eval unless absolutely necessary.
     'script-src': scriptBase,
-    // Style policy
     'style-src': styleBase,
-    // Images
     'img-src': uniq(imgBase),
-    // Ajax/fetch/WS
     'connect-src': uniq(connectBase),
-    // Disallow plugins
     'object-src': [none],
-    // Base tag restrictions
     'base-uri': [self],
-    // Disallow being framed (clickjacking); Next also uses X-Frame-Options DENY via headers.ts
     'frame-ancestors': [none],
-    // Fonts
     'font-src': uniq(fontBase),
-    // Media (images/video/audio uploads playback)
     'media-src': [self, 'blob:', 'data:'],
-    // Workers
     'worker-src': uniq(workerBase),
-    // Prefetch
     'prefetch-src': [self],
-    // Form targets (Okta redirect back to our site)
-    'form-action': [self]
+    'form-action': [self],
   };
 
   if (frameBase.length > 0) {
@@ -202,18 +192,13 @@ export function buildCSP({
   }
 
   if (enableCspReporting && reportToGroup) {
-    // When you also set Reporting-Endpoints via headers.ts, this links CSP to that group.
     directives['report-to'] = [reportToGroup];
-    // Some user agents still read legacy report-uri; you can run a handler at /api/csp-report if desired.
-    // directives['report-uri'] = ['/api/csp-report'];
   }
 
   if (strict?.requireTrustedTypes) {
     directives['require-trusted-types-for'] = [`'script'`];
-    // You may also define a policy name: directives['trusted-types'] = ['your-policy-name'];
   }
 
-  // Merge user-allowed extras
   if (allow) {
     if (allow.script?.length) directives['script-src'] = uniq([...(directives['script-src'] as string[]), ...allow.script.map(asOrigin)]);
     if (allow.style?.length) directives['style-src'] = uniq([...(directives['style-src'] as string[]), ...allow.style.map(asOrigin)]);
@@ -229,7 +214,6 @@ export function buildCSP({
   return { directives };
 }
 
-/** Serialize to a CSP header string (directive order kept readable). */
 export function serializeCSP(policy: CspPolicy): string {
   const order = [
     'default-src',
@@ -249,7 +233,7 @@ export function serializeCSP(policy: CspPolicy): string {
     'trusted-types',
     'upgrade-insecure-requests',
     'report-to',
-    'report-uri'
+    'report-uri',
   ];
 
   const lines: string[] = [];
@@ -263,7 +247,6 @@ export function serializeCSP(policy: CspPolicy): string {
     }
   }
 
-  // Include any custom directives not in the default order
   for (const [k, v] of Object.entries(policy.directives)) {
     if (order.includes(k)) continue;
     if (v === true) {
@@ -276,37 +259,34 @@ export function serializeCSP(policy: CspPolicy): string {
   return lines.join('; ');
 }
 
-/** Tuple key/value ready to pass into Headers.set(...). */
 export function cspHeader(policy: CspPolicy): [key: string, value: string] {
   return ['Content-Security-Policy', serializeCSP(policy)];
 }
 
-/** Build a `<meta httpEquiv="Content-Security-Policy" content="...">` string (for SSR fallback). */
 export function cspMetaTag(policy: CspPolicy): string {
   const content = serializeCSP(policy).replace(/"/g, '&quot;');
   return `<meta http-equiv="Content-Security-Policy" content="${content}">`;
 }
 
-/** Convenience: build and serialize in one go. */
 export function buildAndSerializeCSP(opts?: CspBuildOptions): string {
   return serializeCSP(buildCSP(opts));
 }
 
-/** Opinionated defaults for Bowdoin Marketplace, reading env. */
 export function defaultCSP(nonce?: string): CspPolicy {
   return buildCSP({
     ...(nonce ? { nonce } : {}),
-    oktaIssuer: env.OKTA_ISSUER,
+    oktaIssuer: stringFromEnv('OKTA_ISSUER', ''),
     imageHosts: DEFAULT_IMAGE_HOSTS,
     analyticsHosts: DEFAULT_ANALYTICS,
-    upgradeInsecure: env.NODE_ENV === 'production',
+    upgradeInsecure: DEFAULT_UPGRADE_INSECURE,
     reportToGroup: 'default',
-    enableCspReporting: false, // enable when you wire reporting endpoints
+    enableCspReporting: false,
     strict: {
-      strictDynamic: false, // flip to true after verifying script nonces across the app
-      disallowInlineStyles: false, // flip to true if all styles are CSP-compliant
-      requireTrustedTypes: false // flip after adding a TT policy in the app
-    }
+      strictDynamic: false,
+      disallowInlineStyles: false,
+      requireTrustedTypes: false,
+    },
   });
 }
+
 export const buildContentSecurityPolicy = buildCSP;

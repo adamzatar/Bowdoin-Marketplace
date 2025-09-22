@@ -4,7 +4,7 @@
 // and JSON bodies in App Router route handlers. Keep these small, composable,
 // and re-usable across endpoints.
 
-import { z, ZodError, type ZodTypeAny, type ZodIssue } from 'zod';
+import { z } from 'zod';
 
 /* ─────────────────────────── Common field schemas ─────────────────────────── */
 
@@ -16,7 +16,7 @@ export const NonEmpty = z.string().trim().min(1, 'required');
 
 export const ISODateString = z
   .string()
-  .refine((v) => !Number.isNaN(Date.parse(v)), { message: 'invalid date' });
+  .refine((v: string) => !Number.isNaN(Date.parse(v)), { message: 'invalid date' });
 
 /** Price in cents, non-negative integer, fits PostgreSQL int4. */
 export const PriceCents = z.number().int().min(0).max(2_147_483_647);
@@ -24,7 +24,7 @@ export const PriceCents = z.number().int().min(0).max(2_147_483_647);
 /** Boolean-ish query values like "true"/"1"/"false"/"0". */
 export const Booleanish = z
   .union([z.boolean(), z.string()])
-  .transform((v) => {
+  .transform((v: boolean | string) => {
     if (typeof v === 'boolean') return v;
     const s = v.toLowerCase();
     if (s === 'true' || s === '1' || s === 'yes') return true;
@@ -55,12 +55,8 @@ export const searchQuery = z.object({
   // allows combining with paginationQuery via .merge()
 });
 
-/* ─────────────────────────── Endpoint-specific inputs ───────────────────────
-   Note: If you already defined canonical schemas in @bowdoin/contracts,
-   prefer importing those here to avoid drift. These are safe, minimal fallbacks.
-------------------------------------------------------------------------------- */
+/* ─────────────────────────── Endpoint-specific inputs ─────────────────────── */
 
-/** Listings: create & update payloads */
 export const createListingInput = z.object({
   title: NonEmpty.max(120),
   description: NonEmpty.max(4000),
@@ -72,9 +68,11 @@ export const createListingInput = z.object({
 
 export const updateListingInput = createListingInput
   .partial()
-  .refine((obj) => Object.keys(obj).length > 0, { message: 'empty update' });
+  .refine(
+    (obj: Record<string, unknown>) => Object.keys(obj).length > 0,
+    { message: 'empty update' },
+  );
 
-/** Messages: thread creation + message send */
 export const createThreadInput = z.object({
   recipientId: UUID,
   listingId: UUID.optional(),
@@ -85,19 +83,12 @@ export const createMessageInput = z.object({
   body: NonEmpty.max(4000),
 });
 
-/** Upload: S3 presign */
 export const presignUploadInput = z.object({
   filename: NonEmpty.max(255),
   contentType: NonEmpty.max(128),
-  size: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(30 * 1024 * 1024)
-    .optional(), // up to 30MB by default
+  size: z.coerce.number().int().positive().max(30 * 1024 * 1024).optional(), // up to 30MB by default
 });
 
-/** Users: affiliation verify flow */
 export const affiliationRequestInput = z.object({
   method: z.enum(['edu_email']).default('edu_email'),
   eduEmail: Email,
@@ -107,7 +98,6 @@ export const affiliationConfirmInput = z.object({
   token: NonEmpty.max(256),
 });
 
-/** Admin actions */
 export const adminBanUserInput = z.object({
   reason: NonEmpty.max(500).optional(),
 });
@@ -117,17 +107,19 @@ export const adminRemoveListingInput = z.object({
 
 /* ────────────────────────────── Parse helpers ─────────────────────────────── */
 
+/** Minimal “schema-like” interface; avoids importing internal Zod types. */
+type Parsable<T> = { parse: (data: unknown) => T };
+
 /**
  * Parse URLSearchParams into a typed object using a zod schema.
  * Example:
  *   const q = parseQuery(new URL(req.url), paginationQuery.merge(searchQuery))
  */
-export function parseQuery<T extends ZodTypeAny>(url: URL, schema: T): z.infer<T> {
-  // Convert multi-value params to string or array consistently
+export function parseQuery<T>(url: URL, schema: Parsable<T>): T {
   const params = Object.fromEntries(url.searchParams.entries());
   try {
     return schema.parse(params);
-  } catch (err) {
+  } catch (err: unknown) {
     throw httpZodError(400, 'invalid_query', err);
   }
 }
@@ -136,10 +128,7 @@ export function parseQuery<T extends ZodTypeAny>(url: URL, schema: T): z.infer<T
  * Parse JSON body using a zod schema, with robust error shaping.
  * Adds a small safeguard for non-JSON content types.
  */
-export async function parseJSON<T extends ZodTypeAny>(
-  req: Request,
-  schema: T,
-): Promise<z.infer<T>> {
+export async function parseJSON<T>(req: Request, schema: Parsable<T>): Promise<T> {
   const ct = req.headers.get('content-type') ?? '';
   if (!ct.toLowerCase().includes('application/json')) {
     throw httpError(415, 'unsupported_media_type', [
@@ -156,14 +145,18 @@ export async function parseJSON<T extends ZodTypeAny>(
   }
   try {
     return schema.parse(data);
-  } catch (err) {
+  } catch (err: unknown) {
     throw httpZodError(422, 'invalid_body', err);
   }
 }
 
 /* ───────────────────────────── HTTP error helpers ─────────────────────────── */
 
-type Issue = Pick<ZodIssue, 'path' | 'message' | 'code'>;
+type Issue = {
+  path: (string | number)[];
+  message: string;
+  code: string;
+};
 type Problem = {
   error: string;
   issues?: Issue[];
@@ -176,12 +169,23 @@ export function httpError(status: number, message: string, issues?: Issue[]): Re
   });
 }
 
+type ZodIssueShape = {
+  path: (string | number)[];
+  message: string;
+  code: string;
+};
+
 export function httpZodError(status: number, message: string, err: unknown): Response {
-  if (err instanceof ZodError) {
-    const issues: Issue[] = err.issues.map((i) => ({
-      path: i.path,
-      message: i.message,
-      code: i.code,
+  if (
+    err &&
+    typeof err === 'object' &&
+    'issues' in err &&
+    Array.isArray((err as { issues?: unknown }).issues)
+  ) {
+    const issues: Issue[] = (err as { issues: ZodIssueShape[] }).issues.map((issue) => ({
+      path: issue.path,
+      message: issue.message,
+      code: issue.code,
     }));
     return httpError(status, message, issues);
   }
@@ -192,10 +196,10 @@ export function httpZodError(status: number, message: string, err: unknown): Res
  * Convenience: run a zod schema against an arbitrary object and, on failure,
  * throw an HTTP 422 Response with shaped issues.
  */
-export function mustParse<T extends ZodTypeAny>(schema: T, data: unknown): z.infer<T> {
+export function mustParse<T>(schema: Parsable<T>, data: unknown): T {
   try {
     return schema.parse(data);
-  } catch (err) {
+  } catch (err: unknown) {
     throw httpZodError(422, 'validation_failed', err);
   }
 }

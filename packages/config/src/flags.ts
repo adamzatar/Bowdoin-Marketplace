@@ -40,7 +40,8 @@ export interface FlagOptions {
  * --------------------------------------------------------------------------- */
 function readEnvOverride(name: FlagName): boolean | undefined {
   const envKey = `FLAG_${name}`;
-  const raw = process.env[envKey];
+  const envSource = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  const raw = envSource?.[envKey];
   if (raw === undefined) return undefined;
   const v = String(raw).toLowerCase().trim();
   if (v === "1" || v === "true") return true;
@@ -127,3 +128,18 @@ export function allFlags(audienceKey?: AudienceKey): Record<FlagName, boolean> {
  * Export defaults for convenience in consumers/tests
  * --------------------------------------------------------------------------- */
 export const DEFAULT_FLAG_VALUES: Readonly<Record<FlagName, boolean>> = DEFAULTS;
+
+const envFlagsSource = (globalThis as {
+  process?: { env?: Record<string, string | undefined> };
+}).process?.env;
+
+const VERIFY_CONFIRM_DELAY_MS = (() => {
+  const raw = envFlagsSource?.VERIFY_CONFIRM_DELAY_MS;
+  if (!raw) return 0;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+})();
+
+export const flags = Object.freeze({
+  VERIFY_CONFIRM_DELAY_MS,
+});

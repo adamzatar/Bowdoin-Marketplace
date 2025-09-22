@@ -1,11 +1,12 @@
 // packages/auth/src/nextauth.ts
 
 // ───────────────────────── value imports (external) ─────────────────────────
-import { PrismaAdapter } from "@next-auth/prisma-adapter";
 import { env } from "@bowdoin/config/env";
 import { prisma } from "@bowdoin/db";
 import { audit } from "@bowdoin/observability/audit";
 import { logger } from "@bowdoin/observability/logger";
+import { PrismaAdapter } from "@next-auth/prisma-adapter";
+import NextAuthImport from "next-auth";
 
 // ─────────────────────────── value imports (internal) ───────────────────────
 import { oktaProvider } from "./okta-provider";
@@ -20,10 +21,10 @@ import type { JWT } from "next-auth/jwt";
 
 /** Parse a comma-separated allowlist from env; case-insensitive. */
 function allowedDomains(): string[] {
-  const raw = process.env.ALLOWED_EMAIL_DOMAINS ?? "";
+  const raw = env.ALLOWED_EMAIL_DOMAINS ?? "";
   return raw
     .split(",")
-    .map((d) => d.trim().toLowerCase())
+    .map((d: string) => d.trim().toLowerCase())
     .filter(Boolean);
 }
 
@@ -67,10 +68,11 @@ export function buildNextAuthOptions(): NextAuthOptions {
   const options: NextAuthOptions = {
     adapter,
     providers,
+    // NOTE: your installed next-auth types don't expose `trustHost`; omit it here.
 
     session: {
       // Prefer DB sessions (revocation/admin); switch to `jwt` if desired.
-      strategy: "database",
+      strategy: 'database' as const,
       maxAge: 30 * 24 * 60 * 60, // 30 days
       updateAge: 24 * 60 * 60, // re-issue every 24h of activity
     },
@@ -93,7 +95,7 @@ export function buildNextAuthOptions(): NextAuthOptions {
 
     pages: {
       signIn: "/login",
-      error: "/login", // surface auth errors on login page
+      error: "/login",       // surface auth errors on login page
       verifyRequest: "/verify", // for email provider "check your email"
     },
 
@@ -101,7 +103,7 @@ export function buildNextAuthOptions(): NextAuthOptions {
       /**
        * Gate sign-in. Useful for closed betas / coarse RBAC checks.
        */
-      async signIn({ user, account }) {
+      async signIn({ user }) {
         if (!isDomainAllowed(user?.email ?? null)) {
           logger.warn(
             { userId: user?.id, email: user?.email, reason: "domain_not_allowed" },
@@ -126,7 +128,7 @@ export function buildNextAuthOptions(): NextAuthOptions {
         if (user) {
           t.userId = user.id;
           t.email = user.email ?? t.email ?? null;
-          // If you want a roles snapshot on first sign-in, derive here.
+          // If you want a roles snapshot on first sign-in, derive here:
           // const dec = affiliationRBAC.computeAffiliation({ email: user.email ?? null, oktaGroups: null });
           // t.roles = dec.roles;
         }
@@ -146,13 +148,14 @@ export function buildNextAuthOptions(): NextAuthOptions {
 
         const roles: string[] =
           ((user as unknown as { roles?: string[] })?.roles as string[] | undefined) ??
-          (t.roles ?? affiliationRBAC.computeAffiliation({
-            email: (user?.email ?? t.email ?? null) as string | null,
-            oktaGroups: null,
-          }).roles);
+          (t.roles ??
+            affiliationRBAC.computeAffiliation({
+              email: (user?.email ?? t.email ?? null) as string | null,
+              oktaGroups: null,
+            }).roles);
 
         if (s.user) {
-          s.user.id = userId;
+          if (userId) s.user.id = userId;
           s.user.email = s.user.email ?? user?.email ?? t.email ?? null;
           (s.user as { roles?: string[] }).roles = roles;
         }
@@ -237,3 +240,11 @@ export function buildNextAuthOptions(): NextAuthOptions {
 
 /** Ready-to-use export for consumers. */
 export const authOptions: NextAuthOptions = buildNextAuthOptions();
+
+const NextAuthFn = (NextAuthImport as unknown as { default?: typeof NextAuthImport }).default ??
+  (NextAuthImport as unknown as typeof NextAuthImport);
+
+const handler = NextAuthFn(authOptions);
+
+export const authHandler = handler;
+export { handler as GET, handler as POST };

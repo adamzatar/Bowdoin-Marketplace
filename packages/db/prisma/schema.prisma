@@ -6,8 +6,6 @@
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
-  // NOTE: Postgres extensions (pg_trgm, unaccent) are managed via SQL migrations,
-  // *not* via the `extensions = []` block (removed to avoid P1012).
 }
 
 generator client {
@@ -16,73 +14,83 @@ generator client {
 
 // Enums -----------------------------------------------------------------------
 enum Role {
-  STUDENT
-  STAFF
-  FACULTY
-  ADMIN
-  COMMUNITY
+  STUDENT   @map("student")
+  STAFF     @map("staff")
+  FACULTY   @map("faculty")
+  ADMIN     @map("admin")
+  COMMUNITY @map("community")
+
+  @@map("Role")
 }
 
 enum Affiliation {
-  BOWDOIN
-  COMMUNITY
+  BOWDOIN   @map("bowdoin")
+  COMMUNITY @map("community")
+
+  @@map("Affiliation")
 }
 
 enum Audience {
-  CAMPUS   // visible only to Bowdoin-authenticated users
-  PUBLIC   // visible to all authenticated users (incl. community)
+  CAMPUS @map("campus")   // visible only to Bowdoin-authenticated users
+  PUBLIC @map("public")   // visible to all authenticated users (incl. community)
+
+  @@map("Audience")
 }
 
 enum ListingStatus {
-  ACTIVE
-  SOLD
-  EXPIRED
-  REMOVED
+  ACTIVE  @map("active")
+  SOLD    @map("sold")
+  EXPIRED @map("expired")
+  REMOVED @map("removed")
+
+  @@map("ListingStatus")
 }
 
 enum Condition {
-  NEW
-  EXCELLENT
-  GOOD
-  FAIR
-  POOR
+  NEW       @map("new")
+  EXCELLENT @map("excellent")
+  GOOD      @map("good")
+  FAIR      @map("fair")
+  POOR      @map("poor")
+
+  @@map("Condition")
 }
 
 enum ReportStatus {
-  OPEN
-  REVIEWED
-  ACTIONED
-  DISMISSED
+  OPEN      @map("open")
+  REVIEWED  @map("reviewed")
+  ACTIONED  @map("actioned")
+  DISMISSED @map("dismissed")
+
+  @@map("ReportStatus")
 }
 
 // Models ----------------------------------------------------------------------
 
 // Users of the marketplace
 model User {
-  id                  String        @id @default(uuid())
-  email               String        @unique
-  name                String?
-  role                Role          @default(STUDENT)
-  affiliation         Affiliation   @default(BOWDOIN)
-  createdAt           DateTime      @default(now())
-  updatedAt           DateTime      @updatedAt
+  id                    String                @id @default(uuid())
+  email                 String                @unique
+  name                  String?
+  role                  Role                  @default(STUDENT)
+  affiliation           Affiliation           @default(BOWDOIN)
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
 
   // Community verification signals (Bowdoin users typically not needed)
-  communityVerifiedAt DateTime?
+  communityVerifiedAt   DateTime?
   // Soft ban flag for moderation (app-level enforcement)
-  bannedAt            DateTime?
+  bannedAt              DateTime?
 
   // Relations
-  listings            Listing[]
-  buyerThreads        Thread[]      @relation("buyerThreads")
-  sellerThreads       Thread[]      @relation("sellerThreads")
-  messages            Message[]
-  reportsFiled        Report[]      @relation("reportsFiled")
-  reportsAgainst      Report[]      @relation("reportsAgainst")
-  auditLogs           AuditLog[]    @relation("auditActor")
-
-  // ADD: back-relation for VerificationRequest.user
-  verificationRequests VerificationRequest[]
+  listings              Listing[]
+  buyerThreads          Thread[]              @relation("buyerThreads")
+  sellerThreads         Thread[]              @relation("sellerThreads")
+  messages              Message[]
+  reportsFiled          Report[]              @relation("reportsFiled")
+  reportsAgainst        Report[]              @relation("reportsAgainst")
+  auditLogs             AuditLog[]            @relation("auditActor")
+  verificationRequests  VerificationRequest[] // back-relation
 
   // Indexes
   @@index([role])
@@ -184,9 +192,9 @@ model Report {
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 
-  reporter         User           @relation("reportsFiled", fields: [reporterId], references: [id])
-  reportedUser     User?          @relation("reportsAgainst", fields: [reportedUserId], references: [id])
-  reportedListing  Listing?       @relation("listingReports", fields: [reportedListingId], references: [id], onDelete: Cascade)
+  reporter        User            @relation("reportsFiled", fields: [reporterId], references: [id])
+  reportedUser    User?           @relation("reportsAgainst", fields: [reportedUserId], references: [id])
+  reportedListing Listing?        @relation("listingReports", fields: [reportedListingId], references: [id], onDelete: Cascade)
 
   @@index([reportedUserId])
   @@index([reportedListingId])

@@ -11,6 +11,10 @@
 // - Never leaks the other participant’s email or PII
 // - Response contracts align with @bowdoin/contracts (best-effort runtime check)
 
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 import { Messages } from '@bowdoin/contracts/schemas/messages';
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
@@ -20,10 +24,6 @@ import type { NextRequest } from 'next/server';
 import { jsonError } from '../../../../src/server/handlers/errorHandler';
 import { rateLimit } from '../../../../src/server/rateLimit';
 import { withAuth } from '../../../../src/server/withAuth';
-
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
 
 const noStoreHeaders = {
   'content-type': 'application/json; charset=utf-8',

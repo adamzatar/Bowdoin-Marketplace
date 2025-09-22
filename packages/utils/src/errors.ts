@@ -53,11 +53,20 @@ export class AppError extends Error {
     this.expose = opts.expose ?? defaultExpose(code);
 
     // Better stacks in Node
-    if ((Error as any).captureStackTrace) {
-      (Error as any).captureStackTrace(this, AppError);
+    if (captureStackTrace) {
+      captureStackTrace(this, AppError);
     }
   }
 }
+
+type CaptureStackTrace = (error: Error, constructorOpt?: Function) => void;
+
+function resolveCaptureStackTrace(): CaptureStackTrace | undefined {
+  const maybe = (Error as { captureStackTrace?: CaptureStackTrace }).captureStackTrace;
+  return typeof maybe === 'function' ? maybe : undefined;
+}
+
+const captureStackTrace = resolveCaptureStackTrace();
 
 /** Map canonical codes to HTTP status. */
 export function codeToHttpStatus(code: AppErrorCode): number {
@@ -98,7 +107,7 @@ function defaultExpose(code: AppErrorCode): boolean {
 
 /** Type guard. */
 export function isAppError(e: unknown): e is AppError {
-  return !!e && typeof e === 'object' && (e as any).name === 'AppError' && 'code' in (e as any);
+  return isRecord(e) && e.name === 'AppError' && 'code' in e;
 }
 
 /**
@@ -109,17 +118,19 @@ export function isAppError(e: unknown): e is AppError {
 export function toAppError(e: unknown, fallback: AppErrorCode = 'INTERNAL'): AppError {
   if (isAppError(e)) return e;
 
-  // Best-effort handling of common error shapes
-  const anyErr = e as any;
-  const message =
-    typeof anyErr?.message === 'string'
-      ? anyErr.message
-      : typeof e === 'string'
-      ? e
-      : 'Unexpected error';
+  const message = extractMessage(e) ?? 'Unexpected error';
 
-  // Heuristics for Node/Fetch/Prisma/etc. can be added here if needed.
   return new AppError(fallback, message, { cause: e, expose: fallback !== 'INTERNAL' });
+}
+
+function extractMessage(value: unknown): string | null {
+  if (typeof value === 'string') return value;
+  if (isRecord(value) && typeof value.message === 'string') return value.message;
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 /** Shape used for HTTP JSON error payloads. */

@@ -14,6 +14,8 @@
 //   banExpiresAt  DateTime?
 // If your schema differs, adjust the `data` block accordingly.
 
+export const runtime = 'nodejs';
+
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
 
@@ -148,6 +150,3 @@ export const POST = withAuth(async (req, ctx) => {
     return jsonError(500, 'internal_error');
   }
 });
-
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
