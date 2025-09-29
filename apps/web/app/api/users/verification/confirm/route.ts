@@ -19,10 +19,9 @@ import { z } from 'zod';
 
 import type { NextRequest } from 'next/server';
 
-import { emitAuditEvent } from '../../../../../src/server/handlers/audit';
-import { jsonError } from '../../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../../src/server/rateLimit';
-import { requireSession } from '../../../../../src/server/withAuth';
+import { requireSession, rateLimit, Handlers } from '@/src/server';
+
+const { emitAuditEvent, jsonError } = Handlers;
 
 function noStore() {
   return {

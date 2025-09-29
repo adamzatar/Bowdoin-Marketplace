@@ -87,11 +87,8 @@ const TYPES = [
 
 const SCOPES = computeScopes();
 
-/**
- * Export the commitlint configuration.
- * Uses @commitlint/config-conventional for sensible defaults.
- */
-export default {
+/** @type {import('@commitlint/types').UserConfig} */
+const config = {
   extends: ["@commitlint/config-conventional"],
 
   // Parser preset is conventional-changelog; no extra setup needed for most repos.
@@ -184,3 +181,5 @@ export default {
     },
   },
 };
+
+export default config;

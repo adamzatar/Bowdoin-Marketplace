@@ -6,22 +6,35 @@
   "scripts": {
     "dev": "next dev -p 3001",
     "build": "next build",
+    "build:ci": "pnpm run typecheck && pnpm run lint && next build",
     "start": "next start -p 3000",
-    "clean": "rimraf .next"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . --ext .ts,.tsx",
+    "clean": "rimraf .next .next/cache"
   },
   "dependencies": {
-    "next": "^14.2.32",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "next-auth": "^4.24.7 || ^5",
-
     "@bowdoin/auth": "workspace:*",
     "@bowdoin/config": "workspace:*",
     "@bowdoin/db": "workspace:*",
     "@bowdoin/email": "workspace:*",
     "@bowdoin/observability": "workspace:*",
+    "@bowdoin/queue": "workspace:*",
     "@bowdoin/rate-limit": "workspace:*",
     "@bowdoin/security": "workspace:*",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.52.1",
+    "@opentelemetry/core": "^1.28.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.52.1",
+    "@opentelemetry/instrumentation": "^0.52.1",
+    "@opentelemetry/resources": "^1.28.0",
+    "@opentelemetry/sdk-trace-base": "^1.28.0",
+    "@opentelemetry/sdk-trace-node": "^1.28.0",
+    "@opentelemetry/semantic-conventions": "^1.28.0",
+    "next": "^14.2.32",
+    "next-auth": "4.24.11",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "yaml": "^2.4.5",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -30,6 +43,10 @@
     "@types/react-dom": "^18.3.7",
     "eslint": "^8.57.0",
     "prettier": "^3",
+    "rimraf": "^6.0.1",
     "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=18.18.0"
   }
 }

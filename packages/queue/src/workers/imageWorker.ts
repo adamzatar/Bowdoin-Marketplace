@@ -1,315 +1,341 @@
-// packages/queue/src/workers/imageWorker.ts
-/**
- * Image processing worker (BullMQ).
- *
- * Responsibilities
- * - Consume jobs from the IMAGE queue (see QUEUE_NAMES in ../index).
- * - Validate payloads with the shared Zod schema.
- * - Download original from S3, process with sharp (strip EXIF, resize, convert).
- * - Upload optimized variants back to S3 with strong cache headers.
- * - (Best-effort) update DB state if an image record id is provided.
- * - Emit rich logs/metrics/spans and handle retries/backoff gracefully.
- *
- * Notes
- * - This file does *not* register the queue; it only runs the Worker.
- * - A small runner (e.g. apps/web/worker/image-processor.ts) should call startImageWorker().
- * - All I/O dependencies (S3, Prisma, Redis) are imported via internal packages.
- */
+/* eslint-disable import/no-extraneous-dependencies */
 
-
-import path from 'node:path';
-import { performance } from 'node:perf_hooks';
-
-
-import { env } from '@bowdoin/config/env';
-import { logger as baseLogger } from '@bowdoin/observability/logger';
-import { metrics } from '@bowdoin/observability/metrics';
-import { startSpan } from '@bowdoin/observability/tracing';
-
-import { Worker, QueueEvents, type Processor, type Job } from 'bullmq';
-import sharp from 'sharp';
-import { z } from 'zod';
-
-
-import { getQueueConnection } from '../connection';
+import { Worker, type Processor, type WorkerOptions, type JobsOptions } from "bullmq";
 import {
-  ImageJobNames,
-  type ProcessImagePayload,
-  ProcessImagePayloadSchema,
-} from '../jobs/imageProcessing';
-import type { JobsOptions} from 'bullmq';
+  S3Client,
+  GetObjectCommand,
+  PutObjectCommand,
+  HeadObjectCommand,
+  type S3ClientConfig,
+} from "@aws-sdk/client-s3";
+import sharp, { type FitEnum, type FormatEnum } from "sharp";
+import { logger } from "@bowdoin/observability/logger";
+import { metrics } from "@bowdoin/observability/metrics";
 
+// ------------------------------ types ------------------------------
 
-// Optional: use the shared db client if present
-// (Worker tolerates absence; wrap in try/catch for monorepo bootstraps before db is ready)
-let prisma: any | undefined;
-try {
-   
-  prisma = require('@bowdoin/db').prisma;
-} catch {
-  // noop on purpose
-}
-
-// Optional: prefer storage helpers if implemented; fallback to direct AWS SDK later if needed.
-let s3Helpers: {
-  getObjectBuffer: (bucket: string, key: string) => Promise<{ buffer: Buffer; contentType?: string }>;
-  putObject: (
-    bucket: string,
-    key: string,
-    body: Buffer,
-    contentType: string,
-    cacheControl?: string,
-  ) => Promise<void>;
-} | null = null;
-try {
-   
-  const s3 = require('@bowdoin/storage/src/s3');
-  if (s3?.getObjectBuffer && s3?.putObject) {
-    s3Helpers = {
-      getObjectBuffer: s3.getObjectBuffer,
-      putObject: s3.putObject,
-    };
-  }
-} catch {
-  // noop
-}
-
-// -----------------------------
-// Constants & helpers
-// -----------------------------
-const log = baseLogger.child({ svc: 'image-worker' });
-const QUEUE_NAME = 'image'; // must match QUEUE_NAMES.IMAGE in ../index
-
-const DEFAULT_CONCURRENCY = Number(env.IMAGE_WORKER_CONCURRENCY ?? 3);
-const CACHE_CONTROL =
-  env.S3_IMAGE_CACHE_CONTROL || 'public, max-age=31536000, immutable'; // 1y immutable
-
-const OUTPUT_FORMAT = (env.IMAGE_OUTPUT_FORMAT ?? 'webp') as 'webp' | 'jpeg' | 'avif' | 'png';
-
-function variantKey(originalKey: string, variantName: string, fmt: string) {
-  const { dir, name } = path.parse(originalKey);
-  return path.posix.join(dir, `${name}.${variantName}.${fmt}`);
-}
-
-function normalizeContentType(fmt: string): string {
-  switch (fmt) {
-    case 'webp':
-      return 'image/webp';
-    case 'jpeg':
-      return 'image/jpeg';
-    case 'avif':
-      return 'image/avif';
-    case 'png':
-      return 'image/png';
-    default:
-      return 'application/octet-stream';
-  }
-}
-
-async function downloadOriginal(
-  bucket: string,
-  key: string,
-): Promise<{ buffer: Buffer; contentType?: string }> {
-  if (!s3Helpers) {
-    throw new Error(
-      'S3 helpers are not available yet. Please implement @bowdoin/storage/src/s3 getObjectBuffer/putObject',
-    );
-  }
-  return s3Helpers.getObjectBuffer(bucket, key);
-}
-
-async function uploadVariant(
-  bucket: string,
-  key: string,
-  body: Buffer,
-  fmt: string,
-  cacheControl?: string,
-) {
-  if (!s3Helpers) {
-    throw new Error(
-      'S3 helpers are not available yet. Please implement @bowdoin/storage/src/s3 getObjectBuffer/putObject',
-    );
-  }
-  const contentType = normalizeContentType(fmt);
-  await s3Helpers.putObject(bucket, key, body, contentType, cacheControl ?? CACHE_CONTROL);
-}
-
-async function processVariant(
-  input: Buffer,
-  op: { name: string; width?: number; height?: number; fit?: keyof sharp.FitEnum; quality?: number },
-  outFmt: 'webp' | 'jpeg' | 'avif' | 'png',
-): Promise<Buffer> {
-  const q = typeof op.quality === 'number' ? op.quality : 80;
-
-  let pipeline = sharp(input, { failOnError: false, limitInputPixels: false }).rotate();
-
-  // Strip metadata by default (privacy & smaller files)
-  pipeline = pipeline.withMetadata({ icc: undefined, exif: undefined, iptc: undefined });
-
-  if (op.width || op.height) {
-    pipeline = pipeline.resize({
-      width: op.width,
-      height: op.height,
-      fit: op.fit ?? 'cover',
-      withoutEnlargement: true,
-      fastShrinkOnLoad: true,
-    });
-  }
-
-  switch (outFmt) {
-    case 'webp':
-      pipeline = pipeline.webp({ quality: q, effort: 4 });
-      break;
-    case 'jpeg':
-      pipeline = pipeline.jpeg({ quality: q, mozjpeg: true, chromaSubsampling: '4:4:4' });
-      break;
-    case 'avif':
-      pipeline = pipeline.avif({ quality: q, effort: 4 });
-      break;
-    case 'png':
-      pipeline = pipeline.png({ compressionLevel: 9 });
-      break;
-  }
-
-  return pipeline.toBuffer();
-}
-
-// -----------------------------
-// Processor
-// -----------------------------
-const processor: Processor<ProcessImagePayload, any> = async (job: Job<ProcessImagePayload>) => {
-  const t0 = performance.now();
-  const span = startSpan('image.process', {
-    attributes: {
-      'queue.job.id': job.id,
-      'queue.job.name': job.name,
-      'queue.name': QUEUE_NAME,
-    },
-  });
-
-  try {
-    // Validate & normalize
-    const payload = ProcessImagePayloadSchema.parse(job.data);
-    const bucket = payload.bucket ?? env.S3_BUCKET;
-    if (!bucket) throw new Error('S3 bucket is not configured (env.S3_BUCKET)');
-
-    const baseLog = log.child({
-      jobId: job.id,
-      listingId: payload.listingId,
-      userId: payload.uploaderUserId,
-      key: payload.originalKey,
-    });
-
-    baseLog.info({ msg: 'start image job', ops: payload.operations.map((o) => o.name) });
-
-    // 1) Download original
-    const { buffer: originalBuffer, contentType } = await downloadOriginal(
-      bucket,
-      payload.originalKey,
-    );
-
-    // 2) Process variants
-    const results: Array<{ name: string; key: string; bytes: number }> = [];
-    for (const op of payload.operations) {
-      const variantFmt = op.format ?? OUTPUT_FORMAT;
-      const key = variantKey(payload.originalKey, op.name, variantFmt);
-      const out = await processVariant(originalBuffer, op, variantFmt);
-      await uploadVariant(bucket, key, out, variantFmt, CACHE_CONTROL);
-      results.push({ name: op.name, key, bytes: out.byteLength });
-
-      metrics.counter('image_variant_uploaded_total').add(1, {
-        variant: op.name,
-        fmt: variantFmt,
-      });
-    }
-
-    // (Optional) 3) Update DB (best-effort)
-    if (prisma && payload.dbImageId) {
-      try {
-        await prisma.image.update({
-          where: { id: payload.dbImageId },
-          data: {
-            processedAt: new Date(),
-            processedVariants: results.map((r) => r.key),
-            originalContentType: contentType ?? null,
-          },
-        });
-      } catch (e) {
-        baseLog.warn({ err: e }, 'db update failed (image record not updated)');
-      }
-    }
-
-    const elapsed = Math.round(performance.now() - t0);
-    metrics.counter('image_jobs_completed_total').add(1);
-    metrics.histogram('image_job_duration_ms').record(elapsed);
-
-    baseLog.info({ msg: 'image job completed', elapsedMs: elapsed, results });
-
-    span.setAttribute('job.elapsed_ms', elapsed);
-    span.end();
-
-    return { ok: true, elapsedMs: elapsed, results };
-  } catch (err) {
-    metrics.counter('image_jobs_failed_total').add(1);
-    log.error({ err, jobId: job.id }, 'image job failed');
-    span.recordException(err as Error);
-    span.end();
-    throw err; // let BullMQ handle retry/backoff
-  }
+export type Variant = {
+  name: string;
+  width: number;
+  height?: number;
+  withoutEnlargement: boolean;
+  fit?: keyof FitEnum;
+  format?: keyof FormatEnum; // falls back to IMAGE_OUTPUT_FORMAT if omitted
 };
 
-// -----------------------------
-// Worker bootstrap
-// -----------------------------
-export function startImageWorker(options?: {
-  concurrency?: number;
-  jobsOptions?: JobsOptions;
-}) {
-  const connection = getQueueConnection(); // ioredis instance from ../connection
-  const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
+export type ImageJobData = {
+  // business context
+  listingId: string;
+  uploaderUserId: string;
 
-  const worker = new Worker<ProcessImagePayload>(QUEUE_NAME, processor, {
-    connection,
-    concurrency,
-    // Important for large images; let sharp do file I/O and avoid freezing event loop
-    // BullMQ uses separate workers per concurrency anyway.
+  // storage & keys
+  bucket: string;
+  keyOriginal: string; // canonical
+  /** legacy alias some producers might still send; we normalize to keyOriginal */
+  originalKey?: string;
+  outputPrefix: string;
+
+  // processing
+  stripExif: boolean;
+  overwrite: boolean;
+  variants: Variant[];
+
+  // hints
+  originalContentType?:
+    | "image/webp"
+    | "image/jpeg"
+    | "image/png"
+    | "image/avif"
+    | "image/heic"
+    | "image/heif";
+
+  // optional bookkeeping fields some producers may attach
+  dbImageId?: string;
+  operations?: string[];
+};
+
+export type ImageJobResult = {
+  bucket: string;
+  outputs: Array<{
+    key: string;
+    contentType: string;
+    width: number;
+    height?: number;
+    format: string;
+    bytes: number;
+  }>;
+};
+
+// ------------------------------ env / config ------------------------------
+
+const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
+const S3_REGION = process.env.S3_REGION ?? "us-east-1";
+const S3_ENDPOINT = process.env.S3_ENDPOINT; // optional (LocalStack/MinIO)
+const S3_FORCE_PATH_STYLE =
+  String(process.env.S3_FORCE_PATH_STYLE ?? "").toLowerCase() === "true";
+const S3_ACCESS_KEY_ID = process.env.S3_ACCESS_KEY_ID;
+const S3_SECRET_ACCESS_KEY = process.env.S3_SECRET_ACCESS_KEY;
+
+const IMAGE_WORKER_CONCURRENCY = Number(process.env.IMAGE_WORKER_CONCURRENCY ?? "4");
+const S3_IMAGE_CACHE_CONTROL =
+  process.env.S3_IMAGE_CACHE_CONTROL ?? "public, max-age=31536000, immutable";
+const IMAGE_OUTPUT_FORMAT = (process.env.IMAGE_OUTPUT_FORMAT ?? "webp").toLowerCase() as
+  | "webp"
+  | "jpeg"
+  | "png"
+  | "avif";
+
+// Use caller-provided connection if available; otherwise BullMQ will use REDIS_URL
+export type StartWorkerOptions = {
+  /** BullMQ worker options (you can inject a shared ioredis connection here) */
+  worker?: Omit<WorkerOptions, "concurrency"> & { concurrency?: number };
+  /** name of the queue to consume (default: "image.process") */
+  queueName?: string;
+  /** default job options (retries, etc.) */
+  defaultJobOptions?: JobsOptions;
+};
+
+// ------------------------------ s3 helpers ------------------------------
+
+const region: string = process.env.AWS_REGION ?? S3_REGION;
+
+const s3Config: S3ClientConfig = {
+  region,
+  ...(S3_ENDPOINT ? { endpoint: S3_ENDPOINT } : {}),
+  ...(S3_FORCE_PATH_STYLE ? { forcePathStyle: true } : {}),
+  ...(S3_ACCESS_KEY_ID && S3_SECRET_ACCESS_KEY
+    ? {
+        credentials: {
+          accessKeyId: S3_ACCESS_KEY_ID,
+          secretAccessKey: S3_SECRET_ACCESS_KEY,
+        },
+      }
+    : {}),
+};
+
+const s3 = new S3Client(s3Config);
+
+async function getObjectAsBuffer(bucket: string, key: string): Promise<Buffer> {
+  const out = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  const body = out.Body;
+  if (!body) throw new Error(`S3 GET returned no Body for s3://${bucket}/${key}`);
+  if (Buffer.isBuffer(body)) return body;
+  // Body is a stream in Node – collect into a buffer
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+async function headExists(bucket: string, key: string): Promise<boolean> {
+  try {
+    await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function putObjectBuffer(params: {
+  bucket: string;
+  key: string;
+  body: Buffer;
+  contentType: string;
+  cacheControl?: string;
+}): Promise<number> {
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: params.bucket,
+      Key: params.key,
+      Body: params.body,
+      ContentType: params.contentType,
+      CacheControl: params.cacheControl ?? S3_IMAGE_CACHE_CONTROL,
+    }),
+  );
+  // S3 doesn't return size; use buffer length
+  return params.body.length;
+}
+
+// ------------------------------ processing ------------------------------
+
+function variantKey(prefix: string, v: Variant, format: string): string {
+  const parts = [prefix.replace(/\/+$/, ""), `${v.name}@${v.width}${v.height ? "x" + v.height : ""}`];
+  return `${parts.join("/")}.${format}`;
+}
+
+function normalizeData(data: ImageJobData): ImageJobData {
+  if (!data.keyOriginal && data.originalKey) {
+    data.keyOriginal = data.originalKey;
+  }
+  return data;
+}
+
+function contentTypeFor(format: string): string {
+  switch (format) {
+    case "jpeg":
+      return "image/jpeg";
+    case "png":
+      return "image/png";
+    case "avif":
+      return "image/avif";
+    case "webp":
+    default:
+      return "image/webp";
+  }
+}
+
+async function processOneVariant(
+  source: Buffer,
+  v: Variant,
+  stripExif: boolean,
+  fallbackFormat: string,
+): Promise<{ buffer: Buffer; width: number; height?: number; format: string; contentType: string }> {
+  const format = (v.format ?? fallbackFormat) as string;
+
+  let pipeline = sharp(source, { failOn: "none" });
+
+  if (stripExif) {
+    // Keep metadata minimal; do not inject unsupported keys
+    pipeline = pipeline.withMetadata({});
+  }
+
+  pipeline = pipeline.resize({
+    width: v.width,
+    height: v.height,
+    fit: v.fit ?? "cover",
+    withoutEnlargement: v.withoutEnlargement,
   });
 
-  const events = new QueueEvents(QUEUE_NAME, { connection });
+  switch (format) {
+    case "jpeg":
+      pipeline = pipeline.jpeg({ quality: 80, chromaSubsampling: "4:4:4" });
+      break;
+    case "png":
+      pipeline = pipeline.png({ compressionLevel: 9 });
+      break;
+    case "avif":
+      pipeline = pipeline.avif({ quality: 50 });
+      break;
+    case "webp":
+    default:
+      pipeline = pipeline.webp({ quality: 80 });
+  }
 
-  events.on('completed', ({ jobId }) => {
-    log.debug({ jobId }, 'job completed');
-  });
-  events.on('failed', ({ jobId, failedReason }) => {
-    log.warn({ jobId, failedReason }, 'job failed');
-  });
+  const { data, info } = await pipeline.toBuffer({ resolveWithObject: true });
 
-  worker.on('error', (err) => {
-    log.error({ err }, 'worker error');
-  });
+  return {
+    buffer: data,
+    width: info.width ?? v.width,
+    height: info.height,
+    format,
+    contentType: contentTypeFor(format),
+  };
+}
 
-  log.info(
-    { queue: QUEUE_NAME, concurrency },
-    'image worker started (listening for processing jobs)',
+// ------------------------------ job processor ------------------------------
+
+const processor: Processor<ImageJobData, ImageJobResult> = async (job) => {
+  const t0 = Date.now();
+  const data = normalizeData(job.data);
+
+  const { bucket, keyOriginal, outputPrefix, stripExif, overwrite, variants } = data;
+
+  logger.info(
+    {
+      jobId: job.id,
+      listingId: data.listingId,
+      keyOriginal,
+      variants: variants.map((v) => v.name),
+    },
+    "imageWorker: start",
   );
 
-  const shutdown = async (signal: string) => {
-    log.info({ signal }, 'shutting down image worker...');
-    try {
-      await Promise.allSettled([worker.close(), events.close()]);
-      if (typeof (connection as any)?.quit === 'function') {
-        await (connection as any).quit();
+  const src = await getObjectAsBuffer(bucket, keyOriginal);
+
+  const outputs: ImageJobResult["outputs"] = [];
+
+  for (const v of variants) {
+    const fmt = (v.format ?? IMAGE_OUTPUT_FORMAT).toLowerCase();
+    const key = variantKey(outputPrefix, v, fmt);
+
+    if (!overwrite) {
+      const exists = await headExists(bucket, key);
+      if (exists) {
+        logger.debug({ key }, "imageWorker: skip existing object");
+        continue;
       }
-      log.info('image worker shut down cleanly');
-      // Do not call process.exit here; the host runner should decide.
-    } catch (e) {
-      log.error({ err: e }, 'error during worker shutdown');
     }
-  };
 
-  // Graceful shutdown hooks (idempotent)
-  process.once('SIGINT', () => void shutdown('SIGINT'));
-  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+    const out = await processOneVariant(src, v, stripExif, IMAGE_OUTPUT_FORMAT);
+    const bytes = await putObjectBuffer({
+      bucket,
+      key,
+      body: out.buffer,
+      contentType: out.contentType,
+      cacheControl: S3_IMAGE_CACHE_CONTROL,
+    });
 
-  return { worker, events, shutdown };
+    outputs.push({
+      key,
+      contentType: out.contentType,
+      width: out.width,
+      ...(out.height !== undefined ? { height: out.height } : {}),
+      format: out.format,
+      bytes,
+    });
+  }
+
+  const dt = Date.now() - t0;
+  metrics.recordHttp(dt, { worker: "image" });
+
+  logger.info({ jobId: job.id, outputsCount: outputs.length, ms: dt }, "imageWorker: done");
+
+  return { bucket, outputs };
+};
+
+// ------------------------------ start API ------------------------------
+
+/**
+ * Start the image worker.
+ * - Pass `opts.worker.connection` to reuse a shared Redis connection.
+ * - Override `opts.queueName` if your queue name differs (default "image.process").
+ */
+export function startImageWorker(
+  opts: StartWorkerOptions = {},
+): Worker<ImageJobData, ImageJobResult> {
+  const queueName = opts.queueName ?? "image.process";
+
+  const worker = new Worker<ImageJobData, ImageJobResult>(queueName, processor, {
+    concurrency: opts.worker?.concurrency ?? IMAGE_WORKER_CONCURRENCY,
+    // If caller provided a connection use it; otherwise construct from REDIS_URL
+    connection:
+      opts.worker?.connection ??
+      ({
+        url: REDIS_URL,
+      } as unknown as WorkerOptions["connection"]),
+    // carry through any other worker options the caller passed
+    ...(opts.worker ?? {}),
+  });
+
+  worker.on("failed", (job, err) => {
+    logger.error(
+      { jobId: job?.id, name: job?.name, err: err?.message, stack: err?.stack },
+      "imageWorker: job failed",
+    );
+    metrics.counters.httpRequestErrors.add(1, { worker: "image" });
+  });
+
+  worker.on("completed", (job, result) => {
+    logger.debug({ jobId: job.id, outputs: result?.outputs?.length ?? 0 }, "imageWorker: completed");
+  });
+
+  logger.info(
+    { queueName, concurrency: worker.opts.concurrency, redisUrl: REDIS_URL },
+    "imageWorker: started",
+  );
+
+  return worker;
 }
+
+export default startImageWorker;

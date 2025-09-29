@@ -1,258 +1,243 @@
 // apps/web/app/api/upload/presign/route.ts
 //
-// Generate a short-lived S3 POST policy for direct-to-bucket uploads.
+// POST: generate a short-lived S3 pre-signed PUT URL for authenticated users
 // - Auth required
-// - Validates filename, content type and size
-// - Strong, collision-resistant object key with per-user prefix
-// - Least-privilege policy (content-length-range + exact content-type)
-// - AWS Signature V4 (POST form) with 5 min TTL
-// - Returns fields compatible with <input type="file">/FormData direct upload
-//
-// Assumes AWS creds + bucket config are provided via @bowdoin/config env.
-// If you have a helper in @bowdoin/storage, you can swap the signer below
-// to call that instead; this version is self-contained and production-safe.
+// - Rate limited per user + per IP
+// - Validates filename/contentType/maxBytes
+// - No contracts dependency; local Zod schemas
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-import { randomUUID, createHmac } from 'node:crypto';
+import { Buffer } from 'node:buffer';
+import crypto from 'node:crypto';
 
 import { env } from '@bowdoin/config/env';
-import { Upload } from '@bowdoin/contracts/schemas/upload';
 import { z } from 'zod';
+import { withAuth, rateLimit, Handlers } from '@/src/server';
 
-import { auditEvent } from '../../../../src/server/handlers/audit';
-import { jsonError } from '../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../src/server/rateLimit';
-import { withAuth } from '../../../../src/server/withAuth';
+const { auditEvent: audit, jsonError } = Handlers;
 
-const JSON_NOSTORE = {
+// ----- Zod
+
+const BodyZ = z.object({
+  filename: z.string().min(1).max(256),
+  contentType: z.string().min(3).max(128),
+  maxBytes: z.number().int().positive().max(25 * 1024 * 1024), // 25MB cap
+});
+
+const PresignRespZ = z.object({
+  ok: z.literal(true),
+  data: z.object({
+    url: z.string().url(),
+    fields: z.record(z.string()),
+    key: z.string(),
+    bucket: z.string(),
+    contentType: z.string(),
+    expiresIn: z.number().int().positive(),
+    maxBytes: z.number().int().positive(),
+  }),
+});
+
+type PresignResp = z.infer<typeof PresignRespZ>;
+
+const noStoreHeaders = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store, no-cache, must-revalidate, private',
   pragma: 'no-cache',
   expires: '0',
   vary: 'Cookie',
-};
+} as const;
 
-// ------- Input validation
-
-const BodyZ = z.object({
-  filename: z.string().min(1).max(256),
-  contentType: z
-    .string()
-    .min(3)
-    .max(128)
-    .regex(/^[\w.+-]+\/[\w.+-]+$/i, 'invalid content type'),
-  size: z
-    .number()
-    .int()
-    .positive()
-    .max(1024 * 1024 * 25), // hard cap 25MB
-  checksum: z.string().optional(), // client may send MD5 (base64) or sha256 (hex); we don't enforce at presign step
-  // optional audience/visibility flags you may enforce later when persisting the object key
-  audience: z.enum(['public', 'campus']).optional(),
-});
-
-// Max size per upload; can be lowered by callers
-const DEFAULT_MAX_SIZE = 10 * 1024 * 1024; // 10MB
-const MAX_TTL_SECONDS = 5 * 60; // 5 minutes
-
-// ------- Tiny helpers
-
-function dateStamp(d: Date) {
-  return d.toISOString().slice(0, 10).replace(/-/g, '');
-}
-function amzDatetime(d: Date) {
-  return d
-    .toISOString()
-    .replace(/[-:]/g, '')
-    .replace(/\.\d{3}Z$/, 'Z');
+function getClientIp(req: Request): string {
+  const xf = req.headers.get('x-forwarded-for');
+  if (xf) {
+    const first = xf.split(',')[0]?.trim();
+    if (first) return first;
+  }
+  return req.headers.get('x-real-ip') ?? '0.0.0.0';
 }
 
-function safeFilename(name: string) {
-  // drop directory hints, collapse spaces, keep extension
-  const base = name.split('/').pop()!.split('\\').pop()!;
-  return base
-    .replace(/[^\w.+-]/g, '_')
-    .replace(/_+/g, '_')
-    .slice(0, 128);
+// ----- Helpers
+
+function randomKey(prefix: string) {
+  const rand = crypto.randomBytes(16).toString('hex');
+  const ts = Date.now();
+  return `${prefix}/${ts}-${rand}`;
 }
 
-function buildObjectKey(userId: string, filename: string) {
-  const now = new Date();
-  const yyyy = String(now.getUTCFullYear());
-  const mm = String(now.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(now.getUTCDate()).padStart(2, '0');
-  const id = randomUUID();
-  const file = safeFilename(filename);
-  return `uploads/${userId}/${yyyy}/${mm}/${dd}/${id}-${file}`;
+function base64url(buf: Buffer) {
+  return buf
+    .toString('base64')
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replaceAll('=', '');
 }
 
-// ------- AWS SigV4 for S3 POST policies
-
-type PresignInput = {
-  region: string;
+// Per AWS S3 POST policy (V4)
+function buildS3Policy({
+  bucket,
+  key,
+  contentType,
+  maxBytes,
+  region: _region,
+  expiresInSec,
+  dateISO8601: _dateISO8601,
+  credential,
+  algorithm,
+  amzDate,
+}: {
   bucket: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken?: string;
   key: string;
   contentType: string;
-  maxSize: number;
-  ttlSeconds: number; // <= 900
-  acl?: 'private' | 'public-read';
-};
+  maxBytes: number;
+  region: string;
+  expiresInSec: number;
+  dateISO8601: string; // yyyymmdd
+  credential: string;
+  algorithm: string;
+  amzDate: string; // yyyymmdd'T'HHMMSS'Z'
+}) {
+  const expiration = new Date(Date.now() + expiresInSec * 1000).toISOString();
+  const conditions = [
+    { bucket },
+    ['starts-with', '$key', key],
+    { acl: 'private' },
+    { 'Content-Type': contentType },
+    ['content-length-range', 0, maxBytes],
+    { 'x-amz-credential': credential },
+    { 'x-amz-algorithm': algorithm },
+    { 'x-amz-date': amzDate },
+  ];
+  const policy = { expiration, conditions };
+  const policyBase64 = base64url(Buffer.from(JSON.stringify(policy)));
+  return policyBase64;
+}
 
 function hmac(key: Buffer | string, data: string) {
-  return createHmac('sha256', key).update(data, 'utf8').digest();
+  return crypto.createHmac('sha256', key).update(data, 'utf8').digest();
 }
 
-function awsSigningKey(secret: string, date: string, region: string, service: string) {
-  const kDate = hmac(`AWS4${secret}`, date);
+function getSigningKey(secret: string, dateISO8601: string, region: string, service = 's3') {
+  const kDate = hmac(`AWS4${secret}`, dateISO8601);
   const kRegion = hmac(kDate, region);
   const kService = hmac(kRegion, service);
-  return hmac(kService, 'aws4_request');
+  const kSigning = hmac(kService, 'aws4_request');
+  return kSigning;
 }
 
-function base64(input: unknown) {
-  return Buffer.from(JSON.stringify(input)).toString('base64');
+function sign(policyBase64: string, signingKey: Buffer) {
+  return Buffer.from(crypto.createHmac('sha256', signingKey).update(policyBase64).digest('hex')).toString('hex');
 }
 
-function presignS3Post(input: PresignInput) {
-  const now = new Date();
-  const xAmzDate = amzDatetime(now); // e.g. 20250904T123456Z
-  const shortDate = dateStamp(now); // e.g. 20250904
-  const credential = `${input.accessKeyId}/${shortDate}/${input.region}/s3/aws4_request`;
-  const algorithm = 'AWS4-HMAC-SHA256';
-  const expiresAt = new Date(now.getTime() + input.ttlSeconds * 1000);
+// ----- POST /api/upload/presign
 
-  // Conditions: exact bucket, exact key, exact content-type, size limit, and required AWS fields
-  const conditions: unknown[] = [
-    { bucket: input.bucket },
-    { key: input.key },
-    { 'Content-Type': input.contentType },
-    ['content-length-range', 1, input.maxSize],
-    { 'x-amz-date': xAmzDate },
-    { 'x-amz-algorithm': algorithm },
-    { 'x-amz-credential': credential },
-  ];
+export const POST = withAuth()(async (req, ctx) => {
+  const viewerId = ctx.session?.user?.id ?? ctx.userId;
+  if (!viewerId) return jsonError(401, 'unauthorized');
 
-  if (input.sessionToken) {
-    conditions.push({ 'x-amz-security-token': input.sessionToken });
-  }
-  if (input.acl) {
-    conditions.push({ acl: input.acl });
-  }
+  const ip = getClientIp(req);
 
-  const policy = {
-    expiration: expiresAt.toISOString(),
-    conditions,
-  };
-
-  const policyB64 = base64(policy);
-  const signingKey = awsSigningKey(input.secretAccessKey, shortDate, input.region, 's3');
-  const signature = createHmac('sha256', signingKey).update(policyB64).digest('hex');
-
-  const fields: Record<string, string> = {
-    key: input.key,
-    'Content-Type': input.contentType,
-    'x-amz-algorithm': algorithm,
-    'x-amz-credential': credential,
-    'x-amz-date': xAmzDate,
-    policy: policyB64,
-    'x-amz-signature': signature,
-  };
-  if (input.sessionToken) fields['x-amz-security-token'] = input.sessionToken;
-  if (input.acl) fields['acl'] = input.acl;
-
-  // public endpoint works cross-region; you can swap to virtual-hosted if desired
-  const url = `https://${input.bucket}.s3.${input.region}.amazonaws.com`;
-
-  return { url, fields, expiresAt };
-}
-
-// ------- Route handler
-
-export const POST = withAuth(async (req, ctx) => {
-  // 1) Rate limit (per-user + per-IP)
   try {
     await Promise.all([
-      rateLimit(`rl:upload:presign:user:${ctx.session.user.id}`, 20, 60), // 20/min/user
-      rateLimit(`rl:upload:presign:ip:${ctx.ip}`, 60, 60), // 60/min/ip
+      rateLimit(`rl:upload:presign:user:${viewerId}`, 60, 60),
+      rateLimit(`rl:upload:presign:ip:${ip}`, 120, 60),
     ]);
   } catch {
     return jsonError(429, 'Too many requests');
   }
 
-  // 2) Parse body
   let body: z.infer<typeof BodyZ>;
   try {
     body = BodyZ.parse(await req.json());
   } catch {
-    return jsonError(400, 'invalid_request_body');
+    return jsonError(400, 'invalid_body');
   }
 
-  // 3) Env / config (adjust these to your env loader)
-  const region = env.AWS_REGION || process.env.AWS_REGION || 'us-east-1';
-  const bucket = env.S3_BUCKET || process.env.S3_BUCKET || '';
-  const accessKeyId = env.AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID || '';
-  const secretAccessKey = env.AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY || '';
-  const sessionToken = env.AWS_SESSION_TOKEN || process.env.AWS_SESSION_TOKEN || undefined;
+  const region = env.S3_REGION ?? 'us-east-1';
+  const bucket = env.S3_BUCKET;
+  const accessKeyId = env.S3_ACCESS_KEY_ID;
+  const secretAccessKey = env.S3_SECRET_ACCESS_KEY;
 
-  if (!bucket || !accessKeyId || !secretAccessKey) {
-    return jsonError(500, 'upload_not_configured');
+  if (!accessKeyId || !secretAccessKey) {
+    return jsonError(500, 's3_not_configured');
   }
 
-  // 4) Compute constraints & object key
-  const maxSize = Math.min(body.size, DEFAULT_MAX_SIZE);
-  const key = buildObjectKey(ctx.session.user.id, body.filename);
-  const ttlSeconds = Math.min(MAX_TTL_SECONDS, 5 * 60); // enforce 5 min max
+  const folder = `users/${viewerId}`;
+  const keyPrefix = randomKey(folder);
+  const safeFilename = body.filename.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '');
+  const key = `${keyPrefix}-${safeFilename}`;
 
-  // 5) Create POST policy (SigV4)
-  const { url, fields, expiresAt } = presignS3Post({
-    region,
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(now.getUTCDate()).padStart(2, '0');
+  const dateISO8601 = `${y}${m}${d}`;
+  const amzDate = `${dateISO8601}T${String(now.getUTCHours()).padStart(2, '0')}${String(now.getUTCMinutes()).padStart(
+    2,
+    '0',
+  )}${String(now.getUTCSeconds()).padStart(2, '0')}Z`;
+  const algorithm = 'AWS4-HMAC-SHA256';
+  const credential = `${accessKeyId}/${dateISO8601}/${region}/s3/aws4_request`;
+
+  const expiresInSec = 60;
+  const policyBase64 = buildS3Policy({
     bucket,
-    accessKeyId,
-    secretAccessKey,
-    sessionToken,
     key,
     contentType: body.contentType,
-    maxSize,
-    ttlSeconds,
-    // If you serve images publicly from S3/CloudFront, set public-read. Otherwise keep private.
-    acl: 'private',
+    maxBytes: body.maxBytes,
+    region,
+    expiresInSec,
+    dateISO8601,
+    credential,
+    algorithm,
+    amzDate,
   });
 
-  const response: Upload.PresignResponse = {
+  const signingKey = getSigningKey(secretAccessKey, dateISO8601, region);
+  const signature = sign(policyBase64, signingKey);
+
+  const formFields = {
+    key,
+    bucket,
+    acl: 'private',
+    'Content-Type': body.contentType,
+    'x-amz-algorithm': algorithm,
+    'x-amz-credential': credential,
+    'x-amz-date': amzDate,
+    Policy: policyBase64,
+    'X-Amz-Signature': signature,
+  };
+
+  await audit.emit('upload.presign', {
+    actor: { id: viewerId },
+    target: { type: 's3', id: bucket },
+    meta: { region, keyPrefix: keyPrefix.slice(0, 64), contentType: body.contentType, maxBytes: body.maxBytes },
+    req: { ip, route: '/api/upload/presign' },
+    outcome: 'success',
+  });
+
+  const resp: PresignResp = {
     ok: true,
-    upload: {
-      url,
-      fields,
+    data: {
+      url: `https://${bucket}.s3.${region}.amazonaws.com/`,
+      fields: formFields,
       key,
+      bucket,
       contentType: body.contentType,
-      maxSize,
-      expiresIn: Math.floor((+expiresAt - Date.now()) / 1000),
+      expiresIn: expiresInSec,
+      maxBytes: body.maxBytes,
     },
   };
 
-  // Optional: validate against contract in non-prod
-  if (process.env.NODE_ENV !== 'production') {
+  if (env.NODE_ENV !== 'production') {
     try {
-      Upload.PresignResponseZ.parse(response);
+      PresignRespZ.parse(resp);
     } catch {
-      // don't crash runtime; CI should catch drift
+      // dev-only guard; ignore parsing issues at runtime
     }
   }
 
-  // 6) Audit (fire-and-forget)
-  auditEvent('upload.presign.created', {
-    actorId: ctx.session.user.id,
-    key,
-    contentType: body.contentType,
-    size: body.size,
-    ip: ctx.ip,
-  }).catch(() => {});
-
-  return new Response(JSON.stringify(response), { status: 200, headers: JSON_NOSTORE });
+  return new Response(JSON.stringify(resp), { status: 200, headers: noStoreHeaders });
 });

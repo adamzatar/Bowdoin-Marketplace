@@ -41,7 +41,7 @@ async function getServerSessionSafe(): Promise<Session | null> {
     // Dynamic import so bundlers don’t require next-auth at build time.
     // eslint-disable-next-line import/no-extraneous-dependencies
     const na = (await import('next-auth')) as {
-      getServerSession?: ((...args: any[]) => Promise<unknown>) | undefined;
+      getServerSession?: ((...args: unknown[]) => Promise<unknown>) | undefined;
     };
     if (!na?.getServerSession) return null;
 

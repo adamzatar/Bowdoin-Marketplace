@@ -59,7 +59,8 @@ export class AppError extends Error {
   }
 }
 
-type CaptureStackTrace = (error: Error, constructorOpt?: Function) => void;
+type StackConstructor = abstract new (...args: unknown[]) => unknown;
+type CaptureStackTrace = (error: Error, constructorOpt?: StackConstructor) => void;
 
 function resolveCaptureStackTrace(): CaptureStackTrace | undefined {
   const maybe = (Error as { captureStackTrace?: CaptureStackTrace }).captureStackTrace;

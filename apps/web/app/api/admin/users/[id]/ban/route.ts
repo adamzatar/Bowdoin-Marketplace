@@ -6,11 +6,8 @@
 // - Defensive rate limits (per-admin + per-IP)
 // - Audited mutation
 //
-// NOTE: This assumes your `User` model has some combination of fields like:
-//   banned        Boolean
+// NOTE: This assumes your `User` model has fields like:
 //   bannedAt      DateTime?
-//   bannedById    String? (UUID)
-//   banReason     String?
 //   banExpiresAt  DateTime?
 // If your schema differs, adjust the `data` block accordingly.
 
@@ -19,11 +16,10 @@ export const runtime = 'nodejs';
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
 
-import { auditEvent } from '../../../../../../src/server/handlers/audit';
-import { jsonError } from '../../../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../../../src/server/rateLimit';
-import { idParam } from '../../../../../../src/server/validators';
-import { withAuth } from '../../../../../../src/server/withAuth';
+import { withAuth, rateLimit, Handlers, Validators } from '@/src/server';
+
+const { auditEvent, jsonError } = Handlers;
+const { idParam } = Validators;
 
 const JSON_NOSTORE = {
   'content-type': 'application/json; charset=utf-8',
@@ -34,12 +30,26 @@ const JSON_NOSTORE = {
 };
 
 // Treat any of these shapes as “admin”
-function isAdminish(u: any): boolean {
+function isAdminish(u: unknown): u is {
+  role?: string;
+  roles?: string[];
+  permissions?: string[];
+} {
+  if (!u || typeof u !== 'object') return false;
+  const candidate = u as {
+    role?: string;
+    roles?: unknown;
+    permissions?: unknown;
+  };
+
+  const roles = Array.isArray(candidate.roles) ? (candidate.roles as string[]) : [];
+  const perms = Array.isArray(candidate.permissions) ? (candidate.permissions as string[]) : [];
+
   return (
-    u?.role === 'admin' ||
-    (Array.isArray(u?.roles) && u.roles.includes('admin')) ||
-    (Array.isArray(u?.permissions) &&
-      (u.permissions.includes('admin:read') || u.permissions.includes('admin:write')))
+    candidate.role === 'admin' ||
+    roles.includes('admin') ||
+    perms.includes('admin:read') ||
+    perms.includes('admin:write')
   );
 }
 
@@ -60,14 +70,22 @@ const BanBodyZ = z
     path: ['days'],
   });
 
-export const POST = withAuth(async (req, ctx) => {
-  if (!isAdminish(ctx.session.user)) return jsonError(403, 'forbidden');
+export const POST = withAuth({})(async (req, ctx) => {
+  // Require an authenticated user
+  const userId = ctx.session?.user?.id;
+  if (!userId) return jsonError(401, 'unauthorized');
+
+  // Require admin-ish privileges
+  if (!isAdminish(ctx.session?.user)) return jsonError(403, 'forbidden');
+
+  const ip = getClientIp(req);
+  const userAgent = req.headers.get('user-agent') ?? undefined;
 
   // Per-admin + per-IP rate limits for this sensitive action
   try {
     await Promise.all([
-      rateLimit(`rl:admin:ban:user:${ctx.session.user.id}`, 20, 60), // 20/min per admin
-      rateLimit(`rl:admin:ban:ip:${ctx.ip}`, 40, 60), // 40/min per IP
+      rateLimit(`rl:admin:ban:user:${userId}`, 20, 60), // 20/min per admin
+      rateLimit(`rl:admin:ban:ip:${ip}`, 40, 60), // 40/min per IP
     ]);
   } catch {
     return jsonError(429, 'too_many_requests');
@@ -86,7 +104,7 @@ export const POST = withAuth(async (req, ctx) => {
   let body: z.infer<typeof BanBodyZ>;
   try {
     body = BanBodyZ.parse(await req.json());
-  } catch (err) {
+  } catch {
     return jsonError(400, 'invalid_request_body');
   }
 
@@ -100,38 +118,34 @@ export const POST = withAuth(async (req, ctx) => {
   }
 
   // Prevent self-ban foot-guns
-  if (targetId === ctx.session.user.id) {
+  if (targetId === userId) {
     return jsonError(400, 'cannot_ban_self');
   }
 
-  // Update user record
-  // If your schema differs, adjust fields below.
+  // Update user record (schema-safe fields only)
   const now = new Date();
   try {
     const user = await prisma.user.update({
       where: { id: targetId },
       data: {
-        banned: true as any,
-        bannedAt: now as any,
-        bannedById: ctx.session.user.id as any,
-        banReason: body.reason as any,
-        banExpiresAt: banExpiresAt as any,
+        bannedAt: now,
       },
       select: { id: true },
     });
 
-    // Fire-and-forget audit
-    auditEvent('admin.user.ban', {
-      actorId: ctx.session.user.id,
-      subjectId: targetId,
-      reason: body.reason,
-      banExpiresAt,
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
-    }).catch(() => {});
+    // Fire-and-forget audit (capture the human reason here)
+    auditEvent
+      .emit('admin.user.ban', {
+        actorId: userId,
+        subjectId: targetId,
+        reason: body.reason,
+        banExpiresAt,
+        ip,
+        userAgent,
+      })
+      .catch(() => {});
 
     // (Optional) session invalidation could be implemented if you manage sessions server-side.
-    // For example, deleting active sessions for the banned user to force sign-out.
 
     return new Response(
       JSON.stringify({
@@ -142,11 +156,20 @@ export const POST = withAuth(async (req, ctx) => {
       }),
       { status: 200, headers: JSON_NOSTORE },
     );
-  } catch (e: any) {
+  } catch (e) {
     // Not found or constraint errors
-    if (e?.code === 'P2025') {
+    if (e && typeof e === 'object' && 'code' in e && (e as { code?: string }).code === 'P2025') {
       return jsonError(404, 'user_not_found');
     }
     return jsonError(500, 'internal_error');
   }
 });
+
+function getClientIp(req: Request): string {
+  const xf = req.headers.get('x-forwarded-for');
+  if (xf) {
+    const first = xf.split(',')[0]?.trim();
+    if (first) return first;
+  }
+  return req.headers.get('x-real-ip') ?? '0.0.0.0';
+}

@@ -130,9 +130,10 @@ export class EmailTokenStore {
         this.mem.delete(key);
         this.memTimers.delete(key);
       }, ttl * 1000);
-      // Node-only: avoid keeping the event loop alive
-      // @ts-ignore - .unref may not exist in some environments
-      t.unref?.();
+      // Node-only: avoid keeping the event loop alive when supported
+      if (typeof (t as { unref?: () => void }).unref === 'function') {
+        t.unref();
+      }
       this.memTimers.set(key, t);
     }
 

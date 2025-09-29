@@ -1,0 +1,47 @@
+name: Infra Deploy
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+
+    permissions:
+      id-token: write    # OIDC
+      contents: read     # checkout
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::027660637185:role/BowdoinCdkDeployRole
+          aws-region: us-east-1
+          role-session-name: bowdoin-cdk-deploy
+
+      - name: CDK synth
+        run: pnpm run synth
+
+      - name: CDK diff
+        run: pnpm run diff || true
+
+      - name: CDK deploy
+        run: pnpm run deploy

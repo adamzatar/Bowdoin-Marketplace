@@ -11,9 +11,9 @@ import { headers } from 'next/headers';
 
 import type { NextRequest } from 'next/server';
 
-import { jsonError } from '../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../src/server/rateLimit';
-import { requireSession } from '../../../../src/server/withAuth';
+import { requireSession, rateLimit, Handlers } from '@/src/server';
+
+const { jsonError } = Handlers;
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';

@@ -8,7 +8,7 @@
 // - Defensive error handling + structured logs
 //
 // Assumptions (from your monorepo):
-// - @bowdoin/queue/src/workers/imageWorker exports `createImageWorker(opts?)`
+// - @bowdoin/queue/workers exports `createImageWorker(opts?)`
 //   which returns an object with at least: `{ name: string, close(): Promise<void> }`
 // - @bowdoin/observability provides init/shutdown helpers + a pino-like logger
 // - @bowdoin/config exports validated env (zod) including optional worker overrides
@@ -22,7 +22,7 @@ import { env } from '@bowdoin/config/env';
 import { logger } from '@bowdoin/observability/logger';
 import { metrics } from '@bowdoin/observability/metrics';
 import { initTracing, shutdownTracing } from '@bowdoin/observability/tracing';
-import { createImageWorker } from '@bowdoin/queue/src/workers/imageWorker';
+import { createImageWorker } from '@bowdoin/queue/workers';
 
 // ---------- Config ----------
 const SERVICE_NAME = 'image-processor';
@@ -166,19 +166,25 @@ async function main() {
       logger.info({ jobId: job.id, name: job.name, service: SERVICE_NAME }, 'job started');
       try {
         metrics.counter('image_jobs_started_total').add(1);
-      } catch {}
+      } catch (_err) {
+        // no-op: metrics failures are non-fatal for worker progress
+      }
     },
-    onCompleted(job, result) {
+    onCompleted(job, _result) {
       logger.info({ jobId: job.id, name: job.name, service: SERVICE_NAME }, 'job completed');
       try {
         metrics.counter('image_jobs_completed_total').add(1);
-      } catch {}
+      } catch (_err) {
+        // no-op: metrics failures are non-fatal for worker progress
+      }
     },
     onFailed(job, err) {
       logger.error({ jobId: job?.id, name: job?.name, err, service: SERVICE_NAME }, 'job failed');
       try {
         metrics.counter('image_jobs_failed_total').add(1);
-      } catch {}
+      } catch (_err) {
+        // no-op: metrics failures are non-fatal for worker progress
+      }
     },
   });
 

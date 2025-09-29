@@ -3,7 +3,9 @@
  * Minimal runtime check that subpath exports resolve and work.
  */
 
-import { logger, counters, audit } from '@bowdoin/observability';
+import { logger } from '@bowdoin/observability/logger';
+import { counters } from '@bowdoin/observability/metrics';
+import { audit } from '@bowdoin/observability/audit';
 
 async function main() {
   logger.info({ where: 'observability-smoke' }, 'logger works ✅');

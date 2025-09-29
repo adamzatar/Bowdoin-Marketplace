@@ -113,7 +113,13 @@ const sinks: AuditSink[] = [];
 /** Default pino sink */
 const pinoSink: AuditSink = (evt) => {
   const lvl = evt.severity ?? (evt.outcome === 'failure' || evt.outcome === 'denied' ? 'warn' : 'info');
-  (logger as any)[lvl]?.({ audit: true, ...evt }) ?? logger.info({ audit: true, ...evt });
+  const candidate = (logger as unknown as Record<string, unknown>)[lvl];
+  const logPayload = { audit: true, ...evt };
+  if (typeof candidate === 'function') {
+    (candidate as (payload: unknown) => void)(logPayload);
+    return;
+  }
+  logger.info(logPayload);
 };
 
 registerSink(pinoSink);

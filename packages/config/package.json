@@ -41,7 +41,7 @@
   ],
   "scripts": {
     "clean": "rimraf dist",
-    "build": "pnpm run clean && tsup",
+    "build": "pnpm run clean && tsup && tsc -p tsconfig.src.json --emitDeclarationOnly --outDir dist",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

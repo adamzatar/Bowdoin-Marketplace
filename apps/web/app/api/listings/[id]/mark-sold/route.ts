@@ -4,27 +4,39 @@
 //
 // Guarantees:
 // - Auth required, seller must own the listing
-// - Idempotent: if already sold, returns 200 with existing soldAt
+// - Idempotent: if already sold, returns 200 with current state
 // - Rate-limited
 // - Audited
-// - Contract-safe response shape
+// - Response validated locally to avoid contracts dependency
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-import { ListingPublicZ } from '@bowdoin/contracts/schemas/listings';
+import { env } from '@bowdoin/config/env';
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
 
+
+import { requireSession, rateLimit, Handlers } from '@/src/server';
+
+const { emitAuditEvent, jsonError } = Handlers;
+
 import type { NextRequest } from 'next/server';
 
-import { emitAuditEvent } from '../../../../../src/server/handlers/audit';
-import { jsonError } from '../../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../../src/server/rateLimit';
-import { requireSession } from '../../../../../src/server/withAuth';
-
-const IdParamZ = z.object({ id: z.string().uuid() });
+const ListingPublicZ = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  description: z.string().nullable(),
+  price: z.number(),
+  isFree: z.boolean(),
+  audience: z.enum(['public', 'community']),
+  category: z.string().nullable(),
+  userId: z.string().uuid(),
+  createdAt: z.date(),
+  updatedAt: z.date(),
+  sold: z.boolean(),
+});
 
 const noStoreHeaders = {
   'content-type': 'application/json; charset=utf-8',
@@ -32,164 +44,124 @@ const noStoreHeaders = {
   pragma: 'no-cache',
   expires: '0',
   vary: 'Cookie',
-};
+} as const;
 
-function toPublic(listing: {
+const IdParamZ = z.object({ id: z.string().uuid() });
+
+const listingSelect = {
+  id: true,
+  title: true,
+  description: true,
+  price: true,
+  isFree: true,
+  audience: true,
+  category: true,
+  userId: true,
+  createdAt: true,
+  updatedAt: true,
+  status: true,
+} as const;
+
+type ListingRecord = {
   id: string;
   title: string;
   description: string | null;
-  priceCents: number;
-  currency: string;
-  audience: 'public' | 'community';
+  price: unknown;
+  isFree: boolean;
+  audience: string;
   category: string | null;
-  images: string[];
-  tags: string[];
-  sellerId: string;
+  userId: string;
   createdAt: Date;
   updatedAt: Date;
-  soldAt: Date | null;
-}) {
+  status: string;
+};
+
+function toPublicAudience(audience: string): 'public' | 'community' {
+  if (audience === 'PUBLIC' || audience === 'public') return 'public';
+  if (audience === 'CAMPUS' || audience === 'campus') return 'community';
+  return audience === 'community' ? 'community' : 'public';
+}
+
+function toPublic(listing: ListingRecord) {
   const obj = {
     id: listing.id,
     title: listing.title,
-    description: listing.description ?? '',
-    price: listing.priceCents / 100,
-    currency: listing.currency,
-    audience: listing.audience,
+    description: listing.description,
+    price: Number(listing.price),
+    isFree: listing.isFree,
+    audience: toPublicAudience(listing.audience),
     category: listing.category,
-    images: listing.images,
-    tags: listing.tags,
-    sellerId: listing.sellerId,
+    userId: listing.userId,
     createdAt: listing.createdAt,
     updatedAt: listing.updatedAt,
-    soldAt: listing.soldAt,
+    sold: listing.status === 'SOLD',
   };
-  if (process.env.NODE_ENV !== 'production') {
+
+  if (env.NODE_ENV !== 'production') {
     try {
       ListingPublicZ.parse(obj);
     } catch {
-      // contract drift should be caught by tests; don't crash prod
+      // contract drift should be caught by tests; do not crash runtime
     }
   }
+
   return obj;
 }
 
-// Optional body: allow client to pass a timestamp (validated & clamped to now)
-// for cases where a seller marks an older sale. We cap it to not be in future.
-const BodyZ = z
-  .object({
-    soldAt: z.string().datetime().optional(),
-  })
-  .optional();
-
-export async function POST(req: NextRequest, ctx: { params: { id: string } }) {
-  // AuthN
+export async function POST(_req: NextRequest, ctx: { params: { id: string } }) {
   const auth = await requireSession();
   if (!auth.ok) return auth.error;
   const { session } = auth;
+  if (!session?.user?.id) return jsonError(401, 'unauthorized');
 
-  // Params
   const parsedId = IdParamZ.safeParse(ctx.params);
   if (!parsedId.success) return jsonError(400, 'invalid_id');
   const id = parsedId.data.id;
 
-  // Rate limit: mark-sold is rare -> 20/hour per user
   try {
     await rateLimit(`rl:listings:mark_sold:${session.user.id}`, 20, 3600);
   } catch {
     return jsonError(429, 'Too many requests');
   }
 
-  // Parse body (optional)
-  const raw = await req.text();
-  let body: z.infer<typeof BodyZ> = undefined;
-  if (raw && raw.trim() !== '') {
-    try {
-      body = BodyZ.parse(JSON.parse(raw));
-    } catch {
-      return jsonError(400, 'invalid_body');
-    }
-  }
-
-  // Load and authorize
   const existing = await prisma.listing.findUnique({
     where: { id },
     select: {
       id: true,
-      sellerId: true,
-      soldAt: true,
+      userId: true,
+      status: true,
       title: true,
     },
   });
-  if (!existing) return jsonError(404, 'listing_not_found');
-  if (existing.sellerId !== session.user.id) return jsonError(403, 'forbidden');
 
-  // Idempotency: if already sold, just return success with the listing
-  if (existing.soldAt) {
+  if (!existing) return jsonError(404, 'listing_not_found');
+  if (existing.userId !== session.user.id) return jsonError(403, 'forbidden');
+
+  if (existing.status === 'SOLD') {
     const already = await prisma.listing.findUnique({
       where: { id },
-      select: {
-        id: true,
-        title: true,
-        description: true,
-        priceCents: true,
-        currency: true,
-        audience: true,
-        category: true,
-        images: true,
-        tags: true,
-        sellerId: true,
-        createdAt: true,
-        updatedAt: true,
-        soldAt: true,
-      },
+      select: listingSelect,
     });
-    if (!already) return jsonError(404, 'listing_not_found'); // race (deleted)
+    if (!already) return jsonError(404, 'listing_not_found');
+
     return new Response(JSON.stringify({ ok: true, data: toPublic(already) }), {
       status: 200,
       headers: noStoreHeaders,
     });
   }
 
-  // Compute soldAt
-  const now = new Date();
-  let soldAt = now;
-  if (body?.soldAt) {
-    const requested = new Date(body.soldAt);
-    // Clamp to not be in the future and not older than 1 year for sanity
-    const oneYearAgo = new Date(now);
-    oneYearAgo.setFullYear(now.getFullYear() - 1);
-    if (requested.getTime() > now.getTime()) soldAt = now;
-    else if (requested.getTime() < oneYearAgo.getTime()) soldAt = oneYearAgo;
-    else soldAt = requested;
-  }
-
   try {
     const updated = await prisma.listing.update({
       where: { id },
-      data: { soldAt },
-      select: {
-        id: true,
-        title: true,
-        description: true,
-        priceCents: true,
-        currency: true,
-        audience: true,
-        category: true,
-        images: true,
-        tags: true,
-        sellerId: true,
-        createdAt: true,
-        updatedAt: true,
-        soldAt: true,
-      },
+      data: { status: 'SOLD' },
+      select: listingSelect,
     });
 
     emitAuditEvent('listing.mark_sold', {
       actor: { type: 'user', id: session.user.id },
       listingId: id,
       title: existing.title,
-      soldAt: updated.soldAt?.toISOString(),
+      sold: true,
     }).catch(() => {});
 
     return new Response(JSON.stringify({ ok: true, data: toPublic(updated) }), {

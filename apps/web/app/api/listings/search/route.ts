@@ -18,9 +18,10 @@ import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
 
 // Local/internal utilities (relative paths to avoid alias resolution issues)
-import { getContext } from '../../../../src/server/context';
-import { jsonError } from '../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../src/server/rateLimit';
+import { rateLimit, Handlers, Context } from '@/src/server';
+
+const { jsonError } = Handlers;
+const { getContext } = Context;
 
 // type-only import placed after value imports to satisfy import/order
 import type { NextRequest } from 'next/server';

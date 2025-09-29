@@ -4,8 +4,9 @@
 
 // Datasource & Generator -------------------------------------------------------
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider          = "postgresql"
+  url               = env("DATABASE_URL")
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
 }
 
 generator client {
@@ -31,8 +32,8 @@ enum Affiliation {
 }
 
 enum Audience {
-  CAMPUS @map("campus")   // visible only to Bowdoin-authenticated users
-  PUBLIC @map("public")   // visible to all authenticated users (incl. community)
+  CAMPUS @map("campus") // visible only to Bowdoin-authenticated users
+  PUBLIC @map("public") // visible to all authenticated users (incl. community)
 
   @@map("Audience")
 }
@@ -69,28 +70,28 @@ enum ReportStatus {
 
 // Users of the marketplace
 model User {
-  id                    String                @id @default(uuid())
-  email                 String                @unique
-  name                  String?
-  role                  Role                  @default(STUDENT)
-  affiliation           Affiliation           @default(BOWDOIN)
-  createdAt             DateTime              @default(now())
-  updatedAt             DateTime              @updatedAt
+  id          String      @id @default(uuid())
+  email       String      @unique
+  name        String?
+  role        Role        @default(STUDENT)
+  affiliation Affiliation @default(BOWDOIN)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
 
   // Community verification signals (Bowdoin users typically not needed)
-  communityVerifiedAt   DateTime?
+  communityVerifiedAt DateTime?
   // Soft ban flag for moderation (app-level enforcement)
-  bannedAt              DateTime?
+  bannedAt            DateTime?
 
   // Relations
-  listings              Listing[]
-  buyerThreads          Thread[]              @relation("buyerThreads")
-  sellerThreads         Thread[]              @relation("sellerThreads")
-  messages              Message[]
-  reportsFiled          Report[]              @relation("reportsFiled")
-  reportsAgainst        Report[]              @relation("reportsAgainst")
-  auditLogs             AuditLog[]            @relation("auditActor")
-  verificationRequests  VerificationRequest[] // back-relation
+  listings             Listing[]
+  buyerThreads         Thread[]              @relation("buyerThreads")
+  sellerThreads        Thread[]              @relation("sellerThreads")
+  messages             Message[]
+  reportsFiled         Report[]              @relation("reportsFiled")
+  reportsAgainst       Report[]              @relation("reportsAgainst")
+  auditLogs            AuditLog[]            @relation("auditActor")
+  verificationRequests VerificationRequest[] // back-relation
 
   // Indexes
   @@index([role])
@@ -99,31 +100,31 @@ model User {
 
 // Items listed for sale
 model Listing {
-  id              String         @id @default(uuid())
-  userId          String
-  title           String
-  description     String?
-  price           Decimal        @db.Decimal(10, 2)  // app enforces >= 0
-  isFree          Boolean        @default(false)
-  condition       Condition?
-  category        String?
-  location        String?
-  availableStart  DateTime?
-  availableEnd    DateTime?
-  status          ListingStatus  @default(ACTIVE)
-  audience        Audience       @default(CAMPUS)    // campus-only or public
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
+  id             String        @id @default(uuid())
+  userId         String
+  title          String
+  description    String?
+  price          Decimal       @db.Decimal(10, 2) // app enforces >= 0
+  isFree         Boolean       @default(false)
+  condition      Condition?
+  category       String?
+  location       String?
+  availableStart DateTime?
+  availableEnd   DateTime?
+  status         ListingStatus @default(ACTIVE)
+  audience       Audience      @default(CAMPUS) // campus-only or public
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
   // Full-text search vector (maintained via triggers in SQL migrations)
-  searchVector    Unsupported("tsvector")?
+  searchVector Unsupported("tsvector")?
 
   // Relations
-  owner           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  photos          ListingPhoto[]
-  threads         Thread[]
-  reports         Report[]       @relation("listingReports")
-  auditLogs       AuditLog[]     @relation("listingAudit")
+  owner     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  photos    ListingPhoto[]
+  threads   Thread[]
+  reports   Report[]       @relation("listingReports")
+  auditLogs AuditLog[]     @relation("listingAudit")
 
   // Indexes
   @@index([userId])
@@ -137,29 +138,29 @@ model Listing {
 model ListingPhoto {
   id        String   @id @default(uuid())
   listingId String
-  url       String   // S3 object URL/key (implementation-specific)
+  url       String // S3 object URL/key (implementation-specific)
   caption   String?
   order     Int      @default(0)
   createdAt DateTime @default(now())
 
-  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
 
   @@index([listingId])
 }
 
 // Conversation thread between a buyer and seller about a listing
 model Thread {
-  id        String   @id @default(uuid())
+  id        String    @id @default(uuid())
   listingId String
   sellerId  String
   buyerId   String
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
   closedAt  DateTime?
 
-  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
-  seller    User     @relation("sellerThreads", fields: [sellerId], references: [id])
-  buyer     User     @relation("buyerThreads", fields: [buyerId], references: [id])
-  messages  Message[]
+  listing  Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  seller   User      @relation("sellerThreads", fields: [sellerId], references: [id])
+  buyer    User      @relation("buyerThreads", fields: [buyerId], references: [id])
+  messages Message[]
 
   // Enforce one thread per (listing, buyer)
   @@unique([listingId, buyerId])
@@ -169,32 +170,32 @@ model Thread {
 
 // Individual messages within a thread
 model Message {
-  id        String   @id @default(uuid())
-  threadId  String
-  senderId  String
-  body      String
-  sentAt    DateTime @default(now())
+  id       String   @id @default(uuid())
+  threadId String
+  senderId String
+  body     String
+  sentAt   DateTime @default(now())
 
-  thread    Thread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
-  sender    User     @relation(fields: [senderId], references: [id])
+  thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  sender User   @relation(fields: [senderId], references: [id])
 
   @@index([threadId, sentAt])
 }
 
 // Moderation reports
 model Report {
-  id                String        @id @default(uuid())
+  id                String       @id @default(uuid())
   reporterId        String
-  reportedUserId    String?       // optional
-  reportedListingId String?       // optional
+  reportedUserId    String? // optional
+  reportedListingId String? // optional
   reason            String?
-  status            ReportStatus  @default(OPEN)
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
+  status            ReportStatus @default(OPEN)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
 
-  reporter        User            @relation("reportsFiled", fields: [reporterId], references: [id])
-  reportedUser    User?           @relation("reportsAgainst", fields: [reportedUserId], references: [id])
-  reportedListing Listing?        @relation("listingReports", fields: [reportedListingId], references: [id], onDelete: Cascade)
+  reporter        User     @relation("reportsFiled", fields: [reporterId], references: [id])
+  reportedUser    User?    @relation("reportsAgainst", fields: [reportedUserId], references: [id])
+  reportedListing Listing? @relation("listingReports", fields: [reportedListingId], references: [id], onDelete: Cascade)
 
   @@index([reportedUserId])
   @@index([reportedListingId])
@@ -203,15 +204,15 @@ model Report {
 
 // Email / community verification token store (short-lived)
 model VerificationRequest {
-  id         String   @id @default(uuid())
+  id         String    @id @default(uuid())
   userId     String
-  purpose    String   // e.g., "community-email-verify"
-  tokenHash  String   // store only a hash of the token
+  purpose    String // e.g., "community-email-verify"
+  tokenHash  String // store only a hash of the token
   expiresAt  DateTime
-  createdAt  DateTime @default(now())
+  createdAt  DateTime  @default(now())
   consumedAt DateTime?
 
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, purpose])
   @@index([expiresAt])
@@ -220,22 +221,31 @@ model VerificationRequest {
 
 // Central audit log (security & compliance). Keep payload minimal; avoid PII.
 model AuditLog {
-  id          String    @id @default(uuid())
-  actorUserId String?   // null for system actors
-  action      String    // e.g., "LISTING_CREATED", "AFFILIATION_UPDATE"
-  entityType  String    // "Listing", "User", "Thread", etc.
-  entityId    String?   // relevant entity ID
+  id          String   @id @default(uuid())
+  actorUserId String? // null for system actors
+  action      String // e.g., "LISTING_CREATED", "AFFILIATION_UPDATE"
+  entityType  String // "Listing", "User", "Thread", etc.
+  entityId    String? // relevant entity ID
   ip          String?
   userAgent   String?
   metadata    Json?
-  createdAt   DateTime  @default(now())
+  createdAt   DateTime @default(now())
 
-  actor       User?     @relation("auditActor", fields: [actorUserId], references: [id])
+  actor   User?    @relation("auditActor", fields: [actorUserId], references: [id])
   // Loose link for convenience when entityType = "Listing" (not enforced strictly)
-  listing     Listing?  @relation("listingAudit", fields: [entityId], references: [id])
+  listing Listing? @relation("listingAudit", fields: [entityId], references: [id])
 
   @@index([actorUserId])
   @@index([entityType, entityId])
   @@index([action])
   @@index([createdAt])
+}
+
+// --- NextAuth email flow needs this ---
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@id([identifier, token])
 }

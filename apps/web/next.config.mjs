@@ -1,7 +1,8 @@
+// apps/web/next.config.mjs
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Be explicit: Next should transpile our workspace packages so ESM/TS output is compatible.
-  // Include *all* internal packages that may be imported by the app (directly or indirectly).
+  // Transpile workspace packages so TS/ESM output is compatible in Next.
   transpilePackages: [
     '@bowdoin/config',
     '@bowdoin/contracts',
@@ -13,71 +14,61 @@ const nextConfig = {
     '@bowdoin/storage',
     '@bowdoin/utils',
     '@bowdoin/queue',
-    '@bowdoin/auth', // important: nextauth entrypoint lives here
+    '@bowdoin/auth', // NextAuth entrypoint
   ],
 
-  // Good production defaults
+  // Sensible production defaults
   reactStrictMode: true,
   swcMinify: true,
-  productionBrowserSourceMaps: false, // flip to true if you want browser sourcemaps in prod
-  output: 'standalone',               // simplifies Docker/container deploys
+  productionBrowserSourceMaps: false,
+  output: 'standalone',
 
-  // Make Next friendlier to monorepo ESM deps (esp. subpath exports)
+  // Friendlier ESM in monorepos without custom webpack
   experimental: {
     esmExternals: true,
   },
 
-  // Optional: small Webpack nits that help in monorepos
+  // Keep builds strict (flip to `true` only to temporarily unblock CI)
+  typescript: { ignoreBuildErrors: false },
+  eslint: { ignoreDuringBuilds: true },
+
+  // --- Fix: keep thread-stream worker resolved by Node, not bundled by Next ---
   webpack(config, { isServer }) {
-    // Ensure symlinked workspace packages resolve to their source location correctly.
-    config.resolve = config.resolve || {};
-    config.resolve.symlinks = true;
-
-    config.resolve.alias = {
-      ...(config.resolve.alias ?? {}),
-      'node:crypto': 'crypto',
-      'node:buffer': 'buffer',
-      'node:path': 'path',
-      'node:url': 'url',
-      'node:fs': 'fs',
-    };
-
-    if (!isServer) {
-      config.resolve.fallback = {
-        ...(config.resolve.fallback ?? {}),
-        crypto: false,
-        fs: false,
-        path: false,
-        url: false,
-        buffer: false,
-      };
-    }
-
-    // Some server-only deps may try to resolve in the client bundle via deep imports.
-    // Mark a few heavy/optional server libs as externals on client to avoid accidental bundling.
-    config.externals = config.externals || [];
-
     if (isServer) {
-      config.externals.push(
-        { '@prisma/client': 'commonjs @prisma/client' },
-        { '.prisma/client/default': 'commonjs .prisma/client/default' },
-      );
-    } else {
-      config.externals.push(
-        { redis: 'redis' },
-        { '@prisma/client': '@prisma/client' },
-      );
+      // Preserve any existing externals (array or function)
+      const prevExternals = config.externals ?? [];
+
+      // Force these modules to remain CommonJS externals on the server:
+      // - thread-stream: pino’s worker transport (spins up a worker thread)
+      // - pino: logger (sometimes pulls transports that reference thread-stream)
+      // - worker_threads: Node core (don’t let Webpack try to polyfill)
+      const serverExternals = [
+        { 'thread-stream': 'commonjs thread-stream' },
+        { pino: 'commonjs pino' },
+        { 'worker_threads': 'commonjs worker_threads' },
+      ];
+
+      if (Array.isArray(prevExternals)) {
+        config.externals = [...prevExternals, ...serverExternals];
+      } else if (typeof prevExternals === 'function') {
+        config.externals = async (ctx, cb) => {
+          prevExternals(ctx, (err, res) => {
+            if (err) return cb(err);
+            if (Array.isArray(res)) {
+              cb(null, [...res, ...serverExternals]);
+            } else if (res && typeof res === 'object') {
+              cb(null, [res, ...serverExternals]);
+            } else {
+              cb(null, serverExternals);
+            }
+          });
+        };
+      } else {
+        config.externals = serverExternals;
+      }
     }
 
     return config;
-  },
-
-  // Keep builds strict. (If you need to *temporarily* unblock CI, you can set these to true.)
-  typescript: {
-    ignoreBuildErrors: false,
-  },
-  eslint: {
-    ignoreDuringBuilds: true,
   },
 };
 

@@ -46,7 +46,7 @@ export type SupportedOriginalMime = (typeof SupportedOriginalMimes)[number];
 /** A single variant transform request */
 export const VariantSchema = z.object({
   /** Short, URL-safe name of the variant (e.g., "sm", "md", "lg@2x"). */
-  name: z.string().min(1).max(32).regex(/^[a-z0-9@x\-]+$/),
+  name: z.string().min(1).max(32).regex(/^[a-z0-9@x-]+$/),
   /** Target width in pixels (height is optional; if omitted, maintain aspect ratio). */
   width: z.number().int().positive(),
   /** Optional target height; when omitted, height is auto with respect to `fit`. */
@@ -214,7 +214,12 @@ export function buildListingImageProcessPayload(input: {
     idempotencyKey: input.idempotencyKey ?? randomUUID(),
   });
 
-  if (!isProbablySupportedOriginal({ contentType: payload.originalContentType, keyOriginal: payload.keyOriginal })) {
+  const supportCheck = {
+    keyOriginal: payload.keyOriginal,
+    ...(payload.originalContentType ? { contentType: payload.originalContentType } : {}),
+  } as const;
+
+  if (!isProbablySupportedOriginal(supportCheck)) {
     throw new Error(
       `Unsupported original image type for key=${payload.keyOriginal} contentType=${payload.originalContentType ?? 'unknown'}`,
     );
@@ -270,8 +275,4 @@ export function buildCleanupJob(input: z.input<typeof CleanupPayloadSchema>) {
 }
 
 /** Types re-export for consumers */
-export type {
-  PlannedProcessImagePayload as ImageProcessPlanned,
-  ProcessImagePayload,
-  CleanupPayload,
-};
+export type { PlannedProcessImagePayload as ImageProcessPlanned };

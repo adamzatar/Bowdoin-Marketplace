@@ -2,5 +2,10 @@
   "extends": "./tsconfig.src.json",
   "compilerOptions": {
     "noEmit": true
-  }
+  },
+  "files": [
+    "src/index.ts",
+    "src/env.ts",
+    "src/flags.ts"
+  ]
 }

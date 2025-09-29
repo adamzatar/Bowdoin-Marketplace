@@ -10,8 +10,9 @@ import { consume as consumeTokenBucket } from '@bowdoin/rate-limit/tokenBucket';
 import { z } from 'zod';
 
 // Local app helpers (avoid next-auth & next/headers)
-import { auditEvent } from '../../../../../../src/server/handlers/audit';
-import { requireSession } from '../../../../../../src/server/withAuth';
+import { requireSession, Handlers } from '@/src/server';
+
+const { auditEvent } = Handlers;
 
 const JSON_NOSTORE: HeadersInit = {
   'content-type': 'application/json; charset=utf-8',

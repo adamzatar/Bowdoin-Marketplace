@@ -1,0 +1,34 @@
+{
+  "name": "bm-infra",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18.18.0",
+    "pnpm": ">=8.0.0"
+  },
+  "scripts": {
+    "clean": "rimraf dist cdk.out || rm -rf dist cdk.out",
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -w -p tsconfig.json",
+    "cdk": "cdk -a \"node dist/bin/bm.js\"",
+    "synth": "pnpm build && cdk synth -a \"node dist/bin/bm.js\"",
+    "diff": "pnpm build && cdk diff -a \"node dist/bin/bm.js\"",
+    "deploy": "pnpm build && cdk deploy --require-approval never -a \"node dist/bin/bm.js\"",
+    "destroy": "cdk destroy -a \"node dist/bin/bm.js\"",
+    "bootstrap": "cdk bootstrap -a \"node dist/bin/bm.js\"",
+    "format": "prettier -w ."
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.217.0",
+    "constructs": "10.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.5.2",
+    "ts-node": "10.9.2",
+    "typescript": "5.9.2",
+    "esbuild": "0.25.10",
+    "prettier": "^3.3.3",
+    "rimraf": "^6.0.1"
+  }
+}

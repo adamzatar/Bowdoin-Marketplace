@@ -19,15 +19,29 @@
   ],
   "scripts": {
     "clean": "rimraf dist || rm -rf dist",
-    "build": "pnpm run clean && pnpm run generate && tsup src/index.ts --format esm --dts --sourcemap --out-dir dist",
+
+    "check:prisma": "prisma format && prisma validate",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "pnpm run check:prisma && pnpm run typecheck",
+
     "generate": "prisma generate",
+    "build": "pnpm run clean && pnpm run generate && tsup src/index.ts --format esm --dts --sourcemap --out-dir dist",
+    "prebuild": "pnpm run check",
+
+    "prepare": "pnpm run generate",
+    "postinstall": "prisma generate",
+
+    "prisma": "prisma",
     "migrate:dev": "prisma migrate dev",
+    "migrate:dev:name": "prisma migrate dev --name",
     "migrate:deploy": "prisma migrate deploy",
     "migrate:reset": "prisma migrate reset --force",
+    "db:push": "prisma db push",
+    "db:pull": "prisma db pull",
     "studio": "prisma studio",
+
     "seed": "tsx src/seed.ts",
-    "prepare": "pnpm run generate",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+
     "lint": "eslint \"src/**/*.{ts,tsx}\" --max-warnings=0"
   },
   "dependencies": {

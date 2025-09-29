@@ -16,10 +16,9 @@ import { z } from 'zod';
 
 import type { NextRequest } from 'next/server';
 
-import { emitAuditEvent } from '../../../../src/server/handlers/audit';
-import { jsonError } from '../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../src/server/rateLimit';
-import { requireSession } from '../../../../src/server/withAuth';
+import { requireSession, rateLimit, Handlers } from '@/src/server';
+
+const { emitAuditEvent, jsonError } = Handlers;
 
 // If you already export a shared schema from contracts, you can switch to:
 //   import { AffiliationUpdateInput } from "@bowdoin/contracts/schemas/affiliation";

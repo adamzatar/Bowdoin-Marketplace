@@ -6,8 +6,11 @@ import {
   createQueue,
   createWorker,
 } from './connection';
+import type { WorkerFactoryOptions } from './connection';
 
-import type { Queue, QueueScheduler, Worker ,
+import type {
+  Queue,
+  Worker,
   JobsOptions,
   Processor,
   WorkerOptions as BullWorkerOptions,
@@ -42,12 +45,8 @@ export type { JobsOptions, Processor };
  * These provide a consistent place to create and access queues/schedulers.
  * If you add a new queue, follow the same pattern.
  */
-let _image:
-  | { queue: Queue<unknown>; scheduler: QueueScheduler }
-  | undefined;
-let _email:
-  | { queue: Queue<unknown>; scheduler: QueueScheduler }
-  | undefined;
+let _image: Queue<unknown> | undefined;
+let _email: Queue<unknown> | undefined;
 
 /** Default job options applied to most queues unless overridden per-job */
 const DEFAULT_JOB_OPTIONS: JobsOptions = {
@@ -58,18 +57,18 @@ const DEFAULT_JOB_OPTIONS: JobsOptions = {
 };
 
 /** Image processing queue (thumbnails, EXIF strip, variants, etc.) */
-export function imageQueue() {
+export function imageQueue(): Queue<unknown> {
   if (!_image) {
     _image = createQueue(QueueNames.IMAGE_PROCESSING, {
       prefix: 'bmq', // namespace in Redis
       defaultJobOptions: DEFAULT_JOB_OPTIONS,
     });
   }
-  return _image;
+  return _image!;
 }
 
 /** Outbound email queue (verification, notifications) */
-export function emailQueue() {
+export function emailQueue(): Queue<unknown> {
   if (!_email) {
     _email = createQueue(QueueNames.EMAIL_OUTBOUND, {
       prefix: 'bmq',
@@ -81,7 +80,7 @@ export function emailQueue() {
       },
     });
   }
-  return _email;
+  return _email!;
 }
 
 /**
@@ -105,33 +104,18 @@ export type StartWorkerOptions = {
   workerOptions?: Omit<BullWorkerOptions, 'connection' | 'concurrency' | 'prefix'>;
 };
 
-/** Start the image processing worker */
-export function startImageWorker<T = unknown, R = unknown>(
-  processor: Processor<T, R>,
-  opts: StartWorkerOptions = {},
-): Worker<T, R> {
-  const w = createWorker<T, R>(QueueNames.IMAGE_PROCESSING, processor, {
-    concurrency: opts.concurrency,
-    metrics: !!opts.verboseMetrics,
-    // prefix is fixed to match queue creation; can be made configurable if needed
-    prefix: 'bmq',
-  });
-
-  // Ensure we shutdown cleanly on SIGINT/SIGTERM when running standalone
-  registerQueueSignalHandlers();
-  return w;
-}
-
 /** Start the outbound email worker */
 export function startEmailWorker<T = unknown, R = unknown>(
   processor: Processor<T, R>,
   opts: StartWorkerOptions = {},
 ): Worker<T, R> {
-  const w = createWorker<T, R>(QueueNames.EMAIL_OUTBOUND, processor, {
-    concurrency: opts.concurrency,
+  const workerOpts: WorkerFactoryOptions = {
     metrics: !!opts.verboseMetrics,
     prefix: 'bmq',
-  });
+    ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
+  };
+
+  const w = createWorker<T, R>(QueueNames.EMAIL_OUTBOUND, processor, workerOpts);
 
   registerQueueSignalHandlers();
   return w;
@@ -143,7 +127,7 @@ export function startEmailWorker<T = unknown, R = unknown>(
  */
 export async function initQueues(): Promise<void> {
   await connectRedis();
-  imageQueue(); // creates queue + scheduler
+  imageQueue();
   emailQueue();
 }
 
@@ -158,7 +142,7 @@ export async function enqueueImageJob<T extends Record<string, unknown>>(
   payload: T,
   opts?: JobsOptions,
 ) {
-  const { queue } = imageQueue();
+  const queue = imageQueue();
   return queue.add(name, payload as unknown, opts);
 }
 
@@ -167,7 +151,7 @@ export async function enqueueEmailJob<T extends Record<string, unknown>>(
   payload: T,
   opts?: JobsOptions,
 ) {
-  const { queue } = emailQueue();
+  const queue = emailQueue();
   return queue.add(name, payload as unknown, opts);
 }
 
@@ -178,4 +162,4 @@ export async function enqueueEmailJob<T extends Record<string, unknown>>(
  */
 export * from './jobs/imageProcessing';
 export * from './jobs/send-email-verification';
-export * from './workers/imageWorker';
+export { startImageWorker } from './workers/imageWorker';

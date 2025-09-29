@@ -5,43 +5,39 @@
   "description": "Logging, metrics, tracing, and audit utilities for Bowdoin Marketplace.",
   "type": "module",
   "sideEffects": false,
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
+      "import": "./dist/index.js"
     },
     "./logger": {
       "types": "./dist/logger.d.ts",
-      "default": "./dist/logger.js"
-    },
-    "./tracing": {
-      "types": "./dist/tracing.d.ts",
-      "default": "./dist/tracing.js"
+      "import": "./dist/logger.js"
     },
     "./metrics": {
       "types": "./dist/metrics.d.ts",
-      "default": "./dist/metrics.js"
+      "import": "./dist/metrics.js"
+    },
+    "./tracing": {
+      "types": "./dist/tracing.d.ts",
+      "import": "./dist/tracing.js"
     },
     "./audit": {
       "types": "./dist/audit.d.ts",
-      "default": "./dist/audit.js"
+      "import": "./dist/audit.js"
     },
     "./audit/events/*": {
       "types": "./dist/audit/events/*.d.ts",
-      "default": "./dist/audit/events/*.js"
-    },
-    "./package.json": "./package.json"
+      "import": "./dist/audit/events/*.js"
+    }
   },
   "typesVersions": {
     "*": {
-      "logger": ["dist/logger.d.ts"],
-      "tracing": ["dist/tracing.d.ts"],
-      "metrics": ["dist/metrics.d.ts"],
-      "audit": ["dist/audit.d.ts"],
-      "audit/events/*": ["dist/audit/events/*.d.ts"],
-      "*": ["dist/*"]
+      "*": [
+        "dist/*"
+      ]
     }
   },
   "files": [

@@ -48,13 +48,24 @@ const EnvSchema = z.object({
 
   // Redis
   REDIS_URL: z.string().url(),
+  REDIS_HOST: z.string().optional(),
+  REDIS_PORT: z.coerce.number().int().positive().optional(),
+  REDIS_USERNAME: z.string().optional(),
+  REDIS_PASSWORD: z.string().optional(),
+  REDIS_TLS: z.enum(['true', 'false']).optional(),
+  REDIS_TLS_REJECT_UNAUTHORIZED: z.enum(['true', 'false']).optional(),
+
+  WORKER_CONCURRENCY: z.coerce.number().int().positive().optional(),
 
   // S3 / Storage
   S3_ENDPOINT: z.string().url().optional(),
-  S3_REGION: z.string(),
+  S3_REGION: z.string().optional(),
   S3_BUCKET: z.string(),
-  S3_ACCESS_KEY_ID: z.string(),
-  S3_SECRET_ACCESS_KEY: z.string(),
+  S3_ACCESS_KEY_ID: z.string().optional(),
+  S3_SECRET_ACCESS_KEY: z.string().optional(),
+  S3_FORCE_PATH_STYLE: z.enum(['true', 'false']).optional(),
+  S3_IMAGE_CACHE_CONTROL: z.string().optional(),
+  IMAGE_OUTPUT_FORMAT: z.enum(['webp', 'jpeg', 'png', 'avif']).optional(),
 
   // Email (SMTP defaults; SES supported via EMAIL_PROVIDER=ses)
   EMAIL_FROM: z.string().email(),

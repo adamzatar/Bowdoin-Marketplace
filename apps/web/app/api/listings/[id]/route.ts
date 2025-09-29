@@ -7,10 +7,9 @@ export const revalidate = 0;
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
 
-import { auditEvent } from '../../../../src/server/handlers/audit';
-import { jsonError } from '../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../src/server/rateLimit';
-import { requireSession } from '../../../../src/server/withAuth';
+import { requireSession, rateLimit, Handlers } from '@/src/server';
+
+const { auditEvent, jsonError } = Handlers;
 
 // type-only import placed after local imports to satisfy import/order
 import type { NextRequest } from 'next/server';

@@ -41,5 +41,19 @@
   },
   "publishConfig": {
     "access": "restricted"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./s3": "./dist/s3.js"
+  },
+  "typesVersions": {
+    "*": {
+      "*": [
+        "dist/*"
+      ],
+      "s3": [
+        "dist/s3.d.ts"
+      ]
+    }
   }
 }

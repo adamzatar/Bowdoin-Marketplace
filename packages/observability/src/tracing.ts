@@ -4,23 +4,22 @@
  * OpenTelemetry tracing bootstrap for Node runtimes.
  *
  * Safe-by-default:
- *  - No hard build-time deps on OTEL (soft-require at runtime).
+ *  - No hard build-time deps on OTEL (soft-import at runtime).
  *  - If OTEL is missing, we degrade to no-op tracing and log once.
  *  - Graceful shutdown hooks when enabled.
  */
 
-import { createRequire } from 'node:module';
 import process from 'node:process';
+
 import { logger } from './logger';
 
-const requireShim = createRequire(import.meta.url);
+/* ─────────────────────────── soft import ─────────────────────────── */
 
-/** Soft require that avoids static analysis of module names. */
-function softRequire(mod: string): unknown | null {
+async function softImport<T = unknown>(spec: string): Promise<T | null> {
   try {
-    // eslint-disable-next-line no-new-func
-    const req = Function('r', 'm', 'return r(m)')(requireShim, mod) as unknown;
-    return req;
+    // Dynamic import avoids static analysis / bundler hard deps.
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+    return (await import(spec)) as T;
   } catch {
     return null;
   }
@@ -28,10 +27,17 @@ function softRequire(mod: string): unknown | null {
 
 /* ─────────────────────────── internal state ─────────────────────────── */
 
-let provider: unknown | null = null;
+type TracerProviderLike = {
+  addSpanProcessor: (p: unknown) => void;
+  register: (opts?: unknown) => void;
+  shutdown: () => Promise<void>;
+};
+
+let provider: (TracerProviderLike & Record<string, unknown>) | null = null;
+
 let getTracerApi: ((name?: string) => unknown) | null = null;
-let otelLoaded = false;
 let warnedOnce = false;
+let initPromise: Promise<void> | null = null;
 
 /* ─────────────────────────── env helpers ─────────────────────────── */
 
@@ -58,34 +64,51 @@ function safeJson(maybeJson: string | undefined): Record<string, string> | undef
   }
 }
 
-/* ─────────────────────────── init ─────────────────────────── */
+/* ─────────────────────────── init (lazy, guarded) ─────────────────────────── */
 
-export function initTracing(): void {
-  if (provider || otelLoaded) return;
+async function _initTracing(): Promise<void> {
+  if (provider) return;
 
-  // Lazy-load everything; if any soft-require fails we run without tracing.
-  const otelApi = softRequire('@opentelemetry/api');
-  const resourcesMod = softRequire('@opentelemetry/resources');
-  const semconv = softRequire('@opentelemetry/semantic-conventions');
-  const sdkNode = softRequire('@opentelemetry/sdk-trace-node');
-  const sdkBase = softRequire('@opentelemetry/sdk-trace-base');
-  const exporterHttp = softRequire('@opentelemetry/exporter-trace-otlp-http');
-  const instr = softRequire('@opentelemetry/instrumentation');
-  const autoNode = softRequire('@opentelemetry/auto-instrumentations-node');
-  const core = softRequire('@opentelemetry/core');
+  // Lazy-load everything; if any import fails we run without tracing.
+  const [
+    otelApi,
+    resourcesMod,
+    semconv,
+    sdkNode,
+    sdkBase,
+    exporterHttp,
+    instr,
+    autoNode,
+    core,
+  ] = await Promise.all([
+    softImport<unknown>('@opentelemetry/api'),
+    softImport<unknown>('@opentelemetry/resources'),
+    softImport<unknown>('@opentelemetry/semantic-conventions'),
+    softImport<unknown>('@opentelemetry/sdk-trace-node'),
+    softImport<unknown>('@opentelemetry/sdk-trace-base'),
+    softImport<unknown>('@opentelemetry/exporter-trace-otlp-http'),
+    softImport<unknown>('@opentelemetry/instrumentation'),
+    softImport<unknown>('@opentelemetry/auto-instrumentations-node'),
+    softImport<unknown>('@opentelemetry/core'),
+  ]);
 
-  if (!otelApi || !resourcesMod || !semconv || !sdkNode || !sdkBase || !exporterHttp || !instr || !autoNode || !core) {
+  if (
+    !otelApi ||
+    !resourcesMod ||
+    !semconv ||
+    !sdkNode ||
+    !sdkBase ||
+    !exporterHttp ||
+    !instr ||
+    !autoNode ||
+    !core
+  ) {
     if (!warnedOnce) {
       warnedOnce = true;
-      logger.info(
-        {},
-        '[observability] OpenTelemetry not installed; tracing disabled (no-op).',
-      );
+      logger.info({}, '[observability] OpenTelemetry not installed; tracing disabled (no-op).');
     }
     return;
   }
-
-  otelLoaded = true;
 
   // Enable OTEL diag debug only if LOG_LEVEL=debug
   try {
@@ -102,7 +125,8 @@ export function initTracing(): void {
   }
 
   // Resource (service.name/version/env)
-  const Resource = (resourcesMod as { Resource: new (attrs: Record<string, unknown>) => unknown }).Resource;
+  const Resource = (resourcesMod as { Resource: new (attrs: Record<string, unknown>) => unknown })
+    .Resource;
   const {
     SEMRESATTRS_SERVICE_NAME,
     SEMRESATTRS_SERVICE_VERSION,
@@ -123,7 +147,8 @@ export function initTracing(): void {
   // Sampler: parent-based with optional ratio
   const ratio = parseRatio(getEnv('OTEL_TRACES_SAMPLER_ARG'));
 
-  const NodeTracerProvider = (sdkNode as { NodeTracerProvider: new (cfg: unknown) => unknown }).NodeTracerProvider;
+  const NodeTracerProvider = (sdkNode as { NodeTracerProvider: new (cfg: unknown) => TracerProviderLike })
+    .NodeTracerProvider;
   const {
     AlwaysOnSampler,
     ParentBasedSampler,
@@ -136,31 +161,29 @@ export function initTracing(): void {
     BatchSpanProcessor: new (exporter: unknown, cfg: unknown) => unknown;
   };
 
-  const rootSampler = ratio >= 1 ? new AlwaysOnSampler() : new TraceIdRatioBasedSampler(ratio);
+  const rootSampler =
+    ratio >= 1 ? new (AlwaysOnSampler as new () => unknown)() : new TraceIdRatioBasedSampler(ratio);
   const sampler = new ParentBasedSampler({ root: rootSampler });
 
-  // Provider
-  provider = new (NodeTracerProvider as new (cfg: { resource: unknown; sampler: unknown }) => {
-    addSpanProcessor: (p: unknown) => void;
-    register: (opts?: unknown) => void;
-    shutdown: () => Promise<void>;
-  })({ resource, sampler });
+  // Provider (narrow to a local const to avoid "possibly null" later)
+  const prov = new NodeTracerProvider({ resource, sampler });
+  provider = prov;
 
   // Exporter & processor (omit undefined keys)
   const OTLPTraceExporter = (exporterHttp as {
     OTLPTraceExporter: new (cfg?: { url?: string; headers?: Record<string, string> }) => unknown;
   }).OTLPTraceExporter;
 
-  const url = getEnv('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT') ?? getEnv('OTEL_EXPORTER_OTLP_ENDPOINT');
+  const url =
+    getEnv('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT') ?? getEnv('OTEL_EXPORTER_OTLP_ENDPOINT');
   const headers = safeJson(getEnv('OTEL_EXPORTER_OTLP_HEADERS'));
-
   const exporterCfg: { url?: string; headers?: Record<string, string> } = {};
   if (url) exporterCfg.url = url;
   if (headers && Object.keys(headers).length > 0) exporterCfg.headers = headers;
 
   const exporter = new OTLPTraceExporter(exporterCfg);
 
-  (provider as { addSpanProcessor: (p: unknown) => void }).addSpanProcessor(
+  prov.addSpanProcessor(
     new BatchSpanProcessor(exporter, {
       maxExportBatchSize: 512,
       scheduledDelayMillis: 500,
@@ -176,7 +199,7 @@ export function initTracing(): void {
     W3CBaggagePropagator: new () => unknown;
   };
 
-  (provider as { register: (opts?: { propagator?: unknown }) => void }).register({
+  prov.register({
     propagator: new CompositePropagator({
       propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()],
     }),
@@ -184,8 +207,12 @@ export function initTracing(): void {
 
   // Auto-instrumentations (best-effort)
   try {
-    const { registerInstrumentations } = instr as { registerInstrumentations: (cfg: { instrumentations: unknown[] }) => void };
-    const { getNodeAutoInstrumentations } = autoNode as { getNodeAutoInstrumentations: (cfg: Record<string, unknown>) => unknown };
+    const { registerInstrumentations } = instr as {
+      registerInstrumentations: (cfg: { instrumentations: unknown[] }) => void;
+    };
+    const { getNodeAutoInstrumentations } = autoNode as {
+      getNodeAutoInstrumentations: (cfg: Record<string, unknown>) => unknown;
+    };
 
     registerInstrumentations({
       instrumentations: [
@@ -229,10 +256,7 @@ export function initTracing(): void {
   };
 
   logger.info(
-    {
-      endpoint: url,
-      sampler: ratio >= 1 ? 'parent_always_on' : `parent_ratio_${ratio}`,
-    },
+    { endpoint: url, sampler: ratio >= 1 ? 'parent_always_on' : `parent_ratio_${ratio}` },
     'OpenTelemetry tracing initialized',
   );
 
@@ -241,7 +265,7 @@ export function initTracing(): void {
   const shutdown = async (signal: NodeSignal) => {
     try {
       logger.info({ signal }, 'Shutting down OpenTelemetry tracing…');
-      await (provider as { shutdown?: () => Promise<void> } | null)?.shutdown?.();
+      await provider?.shutdown?.();
     } catch (err) {
       logger.error({ err }, 'Error during OpenTelemetry shutdown');
     } finally {
@@ -249,26 +273,41 @@ export function initTracing(): void {
     }
   };
 
-  process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
-  process.once('SIGINT', () => { void shutdown('SIGINT'); });
+  process.once('SIGTERM', () => {
+    void shutdown('SIGTERM');
+  });
+  process.once('SIGINT', () => {
+    void shutdown('SIGINT');
+  });
+}
+
+/**
+ * Initialize tracing (idempotent). Safe to call multiple times.
+ * Not awaited by default to avoid blocking; callers that need to await may do so.
+ */
+export function initTracing(): void {
+  if (!initPromise && !provider) {
+    initPromise = _initTracing().catch((err) => {
+      logger.warn({ err }, '[observability] tracing init failed; continuing with no-op');
+    });
+  }
 }
 
 /* ─────────────────────────── public API ─────────────────────────── */
 
 /**
  * Retrieve a tracer for manual spans.
- * If OTEL is not available, returns a no-op tracer.
+ * If OTEL is not available, returns a no-op tracer. Initiates tracing
+ * in the background on first call.
  */
 export function getTracer(name = 'app'): {
   startSpan: (n: string) => unknown;
   startActiveSpan: <T>(n: string, fn: (span: unknown) => T) => T;
 } {
+  if (!provider) initTracing();
   if (provider && getTracerApi) {
-    return (getTracerApi(name) as unknown) as ReturnType<typeof getTracer>;
-  }
-  initTracing();
-  if (provider && getTracerApi) {
-    return (getTracerApi(name) as unknown) as ReturnType<typeof getTracer>;
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+    return getTracerApi(name) as ReturnType<typeof getTracer>;
   }
   return noopTracer;
 }
@@ -276,11 +315,14 @@ export function getTracer(name = 'app'): {
 /** Force shutdown (useful in tests). */
 export async function shutdownTracing(): Promise<void> {
   try {
-    await (provider as { shutdown?: () => Promise<void> } | null)?.shutdown?.();
+    await initPromise; // in case shutdown is called immediately after init
+    await provider?.shutdown?.();
   } catch {
     // ignore
   } finally {
     provider = null;
+    initPromise = null;
+    getTracerApi = null;
   }
 }
 
