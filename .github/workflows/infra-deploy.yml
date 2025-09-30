@@ -1,47 +1,164 @@
-name: Infra Deploy
+name: Infra Deploy (CDK via OIDC)
 
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch: {}
+    paths:
+      - "infra/**"
+      - ".github/workflows/infra-deploy.yml"
+      - "pnpm-lock.yaml"
+      - "package.json"
+      - "pnpm-workspace.yaml"
+  workflow_dispatch:
+    inputs:
+      enableCloudFront:
+        description: "Enable CloudFront (true/false)"
+        required: false
+        default: "false"
+      doBootstrap:
+        description: "Run 'cdk bootstrap' before deploy (only needed once per account/region)"
+        required: false
+        default: "false"
+
+concurrency:
+  group: infra-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write   # OIDC
+  contents: read    # checkout
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  NODE_VERSION: "20.x"
+  PNPM_VERSION: "10"
+  AWS_REGION: "us-east-1"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: infra
-
-    permissions:
-      id-token: write    # OIDC
-      contents: read     # checkout
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          version: 10
+          fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v4
         with:
-          node-version: 20
-          cache: pnpm
+          version: ${{ env.PNPM_VERSION }}
 
-      - run: pnpm install --frozen-lockfile
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+
+      - name: PNPM store path
+        id: pnpm-store
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache PNPM store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages (order)
+        run: |
+          pnpm -F @bowdoin/observability run build
+          pnpm -F @bowdoin/config run build
+          pnpm -F @bowdoin/contracts run build
+          pnpm -F @bowdoin/email run build
+          pnpm -F @bowdoin/db run build
+          pnpm -F @bowdoin/auth run build
+          pnpm -F @bowdoin/queue run build
+
+      # Bind GitHub contexts to plain env vars in $GITHUB_ENV (no secrets.* in run:)
+      - name: Export inputs & repo vars to env
+        run: |
+          echo "::group::Bind workflow inputs/vars"
+          # From repo variables (Settings → Variables → Actions)
+          echo "AWS_OIDC_ROLE_ARN=${{ vars.AWS_OIDC_ROLE_ARN }}" >> "$GITHUB_ENV"
+          echo "ROOT_DOMAIN=${{ vars.ROOT_DOMAIN }}" >> "$GITHUB_ENV"
+          echo "APP_SUBDOMAIN=${{ vars.APP_SUBDOMAIN }}" >> "$GITHUB_ENV"
+          # From manual dispatch input (or default "false")
+          echo "ENABLE_CLOUDFRONT=${{ github.event.inputs.enableCloudFront || 'false' }}" >> "$GITHUB_ENV"
+          echo "::endgroup::"
+
+      - name: Preflight — required values present
+        run: |
+          missing=0
+          for v in AWS_OIDC_ROLE_ARN ROOT_DOMAIN APP_SUBDOMAIN; do
+            if [[ -z "${!v}" ]]; then
+              echo "::error::Missing required var: $v"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "Define repo variables in Settings → Variables → Actions:"
+            echo "  • AWS_OIDC_ROLE_ARN (e.g., arn:aws:iam::027660637185:role/BowdoinCdkDeployRole)"
+            echo "  • ROOT_DOMAIN (e.g., bowdoinmarketplace.com)"
+            echo "  • APP_SUBDOMAIN (e.g., app or leave blank)"
+            exit 1
+          fi
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::027660637185:role/BowdoinCdkDeployRole
-          aws-region: us-east-1
+          role-to-assume: ${{ env.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
           role-session-name: bowdoin-cdk-deploy
 
+      - name: WhoAmI
+        run: aws sts get-caller-identity
+
+      - name: CDK bootstrap (optional)
+        if: github.event.inputs.doBootstrap == 'true'
+        working-directory: infra
+        run: pnpm run bootstrap
+
       - name: CDK synth
-        run: pnpm run synth
+        working-directory: infra
+        run: |
+          pnpm run synth -- \
+            -c enableCloudFront="$ENABLE_CLOUDFRONT" \
+            -c rootDomain="$ROOT_DOMAIN" \
+            -c appSubdomain="$APP_SUBDOMAIN" \
+            -c region="$AWS_REGION"
+
+      - name: Upload synthesized templates
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdk.out
+          path: infra/cdk.out
+          retention-days: 7
 
       - name: CDK diff
-        run: pnpm run diff || true
+        working-directory: infra
+        run: |
+          pnpm run diff -- \
+            -c enableCloudFront="$ENABLE_CLOUDFRONT" \
+            -c rootDomain="$ROOT_DOMAIN" \
+            -c appSubdomain="$APP_SUBDOMAIN" \
+            -c region="$AWS_REGION" || true
 
       - name: CDK deploy
-        run: pnpm run deploy
+        working-directory: infra
+        run: |
+          pnpm run deploy -- \
+            -c enableCloudFront="$ENABLE_CLOUDFRONT" \
+            -c rootDomain="$ROOT_DOMAIN" \
+            -c appSubdomain="$APP_SUBDOMAIN" \
+            -c region="$AWS_REGION" \
+            --require-approval=never

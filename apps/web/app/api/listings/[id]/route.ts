@@ -7,9 +7,7 @@ export const revalidate = 0;
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
 
-import { requireSession, rateLimit, Handlers } from '@/src/server';
-
-const { auditEvent, jsonError } = Handlers;
+import { withAuth, rateLimit, auditEvent, jsonError } from '@/server';
 
 // type-only import placed after local imports to satisfy import/order
 import type { NextRequest } from 'next/server';
@@ -120,7 +118,7 @@ async function getListingOr404(id: string): Promise<ListingRow | null> {
 
 // ---------- GET /api/listings/[id]
 
-export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
+export const GET = withAuth<{ params: { id: string } }>({ optional: true })(async (_req, ctx) => {
   const parsed = ListingParamsSchema.safeParse(ctx.params);
   if (!parsed.success) return jsonError(400, 'invalid_id');
 
@@ -136,27 +134,21 @@ export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
   if (!row) return jsonError(404, 'listing_not_found');
 
   // In your current model, CAMPUS = Bowdoin-only; PUBLIC = everyone.
-  if (row.audience === PRISMA_AUDIENCE.campus) {
-    const auth = await requireSession();
-    if (!auth.ok) return auth.error;
+  if (row.audience === PRISMA_AUDIENCE.campus && !ctx.userId) {
+    return jsonError(401, 'unauthorized');
   }
 
   return new Response(JSON.stringify({ data: toPublic(row) }), {
     status: 200,
     headers: noStoreHeaders,
   });
-}
+});
 
 // ---------- PATCH /api/listings/[id]
 
-export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
-  const auth = await requireSession();
-  if (!auth.ok) return auth.error;
-  const session = auth.session;
-  if (!session || !session.user || !session.user.id) {
-    return unauthorizedJson();
-  }
-  const userId = session.user.id as string;
+export const PATCH = withAuth<{ params: { id: string } }>()(async (req, ctx) => {
+  const userId = ctx.userId ?? ctx.session?.user?.id;
+  if (!userId) return unauthorizedJson();
 
   const parsedId = ListingParamsSchema.safeParse(ctx.params);
   if (!parsedId.success) return jsonError(400, 'invalid_id');
@@ -232,7 +224,7 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
       },
     });
 
-    await auditEvent.emit(
+    await auditEvent(
       'listing.updated',
       {
         actor: { type: 'user', id: userId },
@@ -247,7 +239,7 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
       headers: noStoreHeaders,
     });
   } catch (err) {
-    await auditEvent.emit(
+    await auditEvent(
       'listing.update_failed',
       {
         actor: { type: 'user', id: userId },
@@ -258,18 +250,13 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
     );
     return jsonError(500, 'failed_to_update_listing');
   }
-}
+});
 
 // ---------- DELETE /api/listings/[id]
 
-export async function DELETE(_req: NextRequest, ctx: { params: { id: string } }) {
-  const auth = await requireSession();
-  if (!auth.ok) return auth.error;
-  const session = auth.session;
-  if (!session || !session.user || !session.user.id) {
-    return unauthorizedJson();
-  }
-  const userId = session.user.id as string;
+export const DELETE = withAuth<{ params: { id: string } }>()(async (_req, ctx) => {
+  const userId = ctx.userId ?? ctx.session?.user?.id;
+  if (!userId) return unauthorizedJson();
 
   const parsedId = ListingParamsSchema.safeParse(ctx.params);
   if (!parsedId.success) return jsonError(400, 'invalid_id');
@@ -291,7 +278,7 @@ export async function DELETE(_req: NextRequest, ctx: { params: { id: string } })
   try {
     await prisma.listing.delete({ where: { id } });
 
-    await auditEvent.emit(
+    await auditEvent(
       'listing.deleted',
       {
         actor: { type: 'user', id: userId },
@@ -306,7 +293,7 @@ export async function DELETE(_req: NextRequest, ctx: { params: { id: string } })
       headers: noStoreHeaders,
     });
   } catch (err) {
-    await auditEvent.emit(
+    await auditEvent(
       'listing.delete_failed',
       {
         actor: { type: 'user', id: userId },
@@ -317,4 +304,4 @@ export async function DELETE(_req: NextRequest, ctx: { params: { id: string } })
     );
     return jsonError(500, 'failed_to_delete_listing');
   }
-}
+});

@@ -10,9 +10,7 @@ import { consume as consumeTokenBucket } from '@bowdoin/rate-limit/tokenBucket';
 import { z } from 'zod';
 
 // Local app helpers (avoid next-auth & next/headers)
-import { requireSession, Handlers } from '@/src/server';
-
-const { auditEvent } = Handlers;
+import { withAuth, auditEvent } from '@/server';
 
 const JSON_NOSTORE: HeadersInit = {
   'content-type': 'application/json; charset=utf-8',
@@ -88,13 +86,10 @@ function getIpFrom(req: Request): string {
   return '0.0.0.0';
 }
 
-export async function POST(req: Request, ctx: { params: { id: string } }): Promise<Response> {
-  // Authn + admin gate via shared helper
-  const auth = await requireSession();
-  if (!auth.ok) return auth.error;
-  const session = auth.session;
+export const POST = withAuth<{ params: { id: string } }>()(async (req, ctx) => {
+  const session = ctx.session;
   const user = session?.user;
-  const userId = typeof user?.id === 'string' ? user.id : null;
+  const userId = typeof (ctx.userId ?? user?.id) === 'string' ? String(ctx.userId ?? user?.id) : null;
 
   if (!userId) return jsonError(401, 'unauthorized');
   if (!isAdminish(user)) return jsonError(403, 'forbidden');
@@ -127,7 +122,7 @@ export async function POST(req: Request, ctx: { params: { id: string } }): Promi
     });
 
     // Mirror existing audit logging shape, but use local emitter
-    void auditEvent.emit(
+    void auditEvent(
       'admin.listing.remove',
       {
         outcome: 'success',
@@ -155,7 +150,7 @@ export async function POST(req: Request, ctx: { params: { id: string } }): Promi
     logger.error({ err: e, listingId }, 'admin.listing.remove error');
 
     // Emit failure audit as in other routes
-    void auditEvent.emit(
+    void auditEvent(
       'admin.listing.remove',
       {
         outcome: 'failure',
@@ -173,4 +168,4 @@ export async function POST(req: Request, ctx: { params: { id: string } }): Promi
 
     return jsonError(500, 'internal_error');
   }
-}
+});

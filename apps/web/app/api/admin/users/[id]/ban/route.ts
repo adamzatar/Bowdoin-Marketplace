@@ -1,25 +1,10 @@
 // apps/web/app/api/admin/users/[id]/ban/route.ts
-//
-// Admin: ban a user (optionally until a specific time).
-// - Auth required + admin permission
-// - Body validation (reason, duration / until)
-// - Defensive rate limits (per-admin + per-IP)
-// - Audited mutation
-//
-// NOTE: This assumes your `User` model has fields like:
-//   bannedAt      DateTime?
-//   banExpiresAt  DateTime?
-// If your schema differs, adjust the `data` block accordingly.
-
 export const runtime = 'nodejs';
 
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
 
-import { withAuth, rateLimit, Handlers, Validators } from '@/src/server';
-
-const { auditEvent, jsonError } = Handlers;
-const { idParam } = Validators;
+import { withAuth, rateLimit, auditEvent, jsonError, idParam } from '@/server';
 
 const JSON_NOSTORE = {
   'content-type': 'application/json; charset=utf-8',
@@ -53,99 +38,76 @@ function isAdminish(u: unknown): u is {
   );
 }
 
-const BanBodyZ = z
-  .object({
-    // Human-readable reason (logged & auditable)
-    reason: z.string().min(3).max(500),
-    // Ban either for a relative number of days OR until a specific ISO date
-    days: z.coerce.number().int().positive().max(365).optional(),
-    until: z
-      .string()
-      .datetime()
-      .optional()
-      .refine((v) => (v ? !Number.isNaN(Date.parse(v)) : true), 'invalid until date'),
-  })
-  .refine((v) => !!v.days || !!v.until, {
-    message: 'either `days` or `until` must be provided',
-    path: ['days'],
-  });
+const BanBodyZ = z.object({
+  reason: z.string().min(3).max(500),
+  days: z.coerce.number().int().positive().max(365).optional(),
+  until: z
+    .string()
+    .datetime()
+    .refine((value: string) => !Number.isNaN(Date.parse(value)), 'invalid until date')
+    .optional(),
+});
 
 export const POST = withAuth({})(async (req, ctx) => {
-  // Require an authenticated user
   const userId = ctx.session?.user?.id;
   if (!userId) return jsonError(401, 'unauthorized');
 
-  // Require admin-ish privileges
   if (!isAdminish(ctx.session?.user)) return jsonError(403, 'forbidden');
 
   const ip = getClientIp(req);
   const userAgent = req.headers.get('user-agent') ?? undefined;
 
-  // Per-admin + per-IP rate limits for this sensitive action
   try {
     await Promise.all([
-      rateLimit(`rl:admin:ban:user:${userId}`, 20, 60), // 20/min per admin
-      rateLimit(`rl:admin:ban:ip:${ip}`, 40, 60), // 40/min per IP
+      rateLimit(`rl:admin:ban:user:${userId}`, 20, 60),
+      rateLimit(`rl:admin:ban:ip:${ip}`, 40, 60),
     ]);
   } catch {
     return jsonError(429, 'too_many_requests');
   }
 
-  // Validate path param
-  const { params } = req as unknown as { params: { id: string } };
-  let targetId: string;
-  try {
-    targetId = idParam.parse(params).id;
-  } catch {
-    return jsonError(400, 'invalid_user_id');
+  // Prefer ctx.params; fall back to Next req cast if present
+  const routeId =
+    (ctx as { params?: { id?: string } })?.params?.id ??
+    (req as unknown as { params?: { id?: string } })?.params?.id;
+
+  const parsedId = idParam.safeParse({ id: routeId });
+  if (!parsedId.success) return jsonError(400, 'invalid_user_id');
+  const targetId = parsedId.data.id;
+
+  const parsed = BanBodyZ.safeParse(await req.json());
+  if (!parsed.success) return jsonError(400, 'invalid_request_body');
+  const body = parsed.data;
+
+  // Enforce: either `days` or `until`
+  if (!body.days && !body.until) {
+    return jsonError(400, 'either_days_or_until_required');
   }
 
-  // Parse body
-  let body: z.infer<typeof BanBodyZ>;
-  try {
-    body = BanBodyZ.parse(await req.json());
-  } catch {
-    return jsonError(400, 'invalid_request_body');
-  }
-
-  // Compute expiry
   let banExpiresAt: Date | null = null;
-  if (body.until) {
-    banExpiresAt = new Date(body.until);
-  } else if (body.days) {
-    const now = new Date();
-    banExpiresAt = new Date(now.getTime() + body.days * 24 * 60 * 60 * 1000);
-  }
+  if (body.until) banExpiresAt = new Date(body.until);
+  else if (body.days) banExpiresAt = new Date(Date.now() + body.days * 24 * 60 * 60 * 1000);
 
-  // Prevent self-ban foot-guns
   if (targetId === userId) {
     return jsonError(400, 'cannot_ban_self');
   }
 
-  // Update user record (schema-safe fields only)
   const now = new Date();
   try {
     const user = await prisma.user.update({
       where: { id: targetId },
-      data: {
-        bannedAt: now,
-      },
+      data: { bannedAt: now /*, banExpiresAt*/ },
       select: { id: true },
     });
 
-    // Fire-and-forget audit (capture the human reason here)
-    auditEvent
-      .emit('admin.user.ban', {
-        actorId: userId,
-        subjectId: targetId,
-        reason: body.reason,
-        banExpiresAt,
-        ip,
-        userAgent,
-      })
-      .catch(() => {});
-
-    // (Optional) session invalidation could be implemented if you manage sessions server-side.
+    auditEvent('admin.user.ban', {
+      actorId: userId,
+      subjectId: targetId,
+      reason: body.reason,
+      banExpiresAt,
+      ip,
+      userAgent,
+    }).catch(() => {});
 
     return new Response(
       JSON.stringify({
@@ -157,7 +119,6 @@ export const POST = withAuth({})(async (req, ctx) => {
       { status: 200, headers: JSON_NOSTORE },
     );
   } catch (e) {
-    // Not found or constraint errors
     if (e && typeof e === 'object' && 'code' in e && (e as { code?: string }).code === 'P2025') {
       return jsonError(404, 'user_not_found');
     }

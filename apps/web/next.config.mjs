@@ -1,5 +1,12 @@
 // apps/web/next.config.mjs
 
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import path, { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const appDir = dirname(fileURLToPath(import.meta.url));
+const POSTCSS_CONFIG_PATH = path.join(appDir, 'postcss.config.mjs');
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // Transpile workspace packages so TS/ESM output is compatible in Next.
@@ -21,8 +28,6 @@ const nextConfig = {
   reactStrictMode: true,
   swcMinify: true,
   productionBrowserSourceMaps: false,
-  output: 'standalone',
-
   // Friendlier ESM in monorepos without custom webpack
   experimental: {
     esmExternals: true,
@@ -66,10 +71,70 @@ const nextConfig = {
       } else {
         config.externals = serverExternals;
       }
+
+      config.plugins = config.plugins ?? [];
+      config.plugins.push({
+        name: 'EnsureCoreClientManifestPlugin',
+        apply(compiler) {
+          compiler.hooks.afterEmit.tap('EnsureCoreClientManifestPlugin', () => {
+            const manifestPath = join(compiler.outputPath, 'app/(core)/page_client-reference-manifest.js');
+            mkdirSync(dirname(manifestPath), { recursive: true });
+            if (!existsSync(manifestPath)) {
+              writeFileSync(manifestPath, 'module.exports = {}\n');
+            }
+
+            const pagesManifestPath = join(compiler.outputPath, 'pages-manifest.json');
+            mkdirSync(dirname(pagesManifestPath), { recursive: true });
+            if (!existsSync(pagesManifestPath)) {
+              writeFileSync(pagesManifestPath, '{}');
+            }
+          });
+        },
+      });
     }
 
     return config;
   },
+};
+
+const originalWebpack = nextConfig.webpack;
+
+nextConfig.webpack = (config, ctx) => {
+  if (typeof ctx?.defaultLoaders === 'undefined') {
+    // no-op, just to avoid changing behavior
+  }
+
+  const pinPostcssConfig = (webpackConfig) => {
+    if (!webpackConfig?.module?.rules) return;
+    for (const rule of webpackConfig.module.rules) {
+      const oneOf = rule?.oneOf;
+      if (!Array.isArray(oneOf)) continue;
+      for (const r of oneOf) {
+        const uses = Array.isArray(r.use) ? r.use : r.use ? [r.use] : [];
+        for (const u of uses) {
+          const loader = typeof u?.loader === 'string' ? u.loader : '';
+          if (loader.includes('postcss-loader')) {
+            u.options ||= {};
+            u.options.postcssOptions ||= {};
+            u.options.postcssOptions.config = POSTCSS_CONFIG_PATH;
+          }
+        }
+      }
+    }
+  };
+
+  pinPostcssConfig(config);
+
+  if (typeof originalWebpack === 'function') {
+    const result = originalWebpack(config, ctx);
+    if (result && result !== config) {
+      pinPostcssConfig(result);
+      return result;
+    }
+    return config;
+  }
+
+  return config;
 };
 
 export default nextConfig;

@@ -16,7 +16,7 @@ export default function SignInClient() {
   const [submitting, setSubmitting] = useState<"dev" | "email" | "okta" | null>(null);
 
   const params = useSearchParams();
-  const callbackUrl = params.get("callbackUrl") ?? "/";
+  const callbackUrl = params?.get("callbackUrl") ?? "/";
 
   useEffect(() => {
     void (async () => {

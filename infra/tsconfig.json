@@ -1,37 +1,54 @@
 {
   "compilerOptions": {
+    /* Runtime & module system */
     "target": "ES2022",
     "lib": ["ES2022"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "moduleDetection": "force",
 
+    /* Project layout */
     "rootDir": ".",
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo",
 
+    /* Strictness & safety */
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "importsNotUsedAsValues": "error",
     "exactOptionalPropertyTypes": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
     "forceConsistentCasingInFileNames": true,
 
+    /* Interop & JSON */
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
 
-    /* IMPORTANT: turn this off so TS doesn't complain about ESM syntax in “CJS” */
+    /* ESM nuance: keep NodeNext happy if some deps ship CJS */
     "verbatimModuleSyntax": false,
 
+    /* Build behavior */
     "skipLibCheck": true,
     "incremental": true,
+    "noEmit": false,                /* we need JS output for CDK to run */
+    "noEmitOnError": true,          /* fail CI if types are red */
+    "sourceMap": true,
 
-    /* we need JS output for CDK to run */
-    "noEmit": false,
-
-    "types": ["node"]
+    /* Types environment */
+    "types": ["node"],
+    "allowJs": false
   },
-  "include": ["bin/**/*.ts", "lib/**/*.ts"],
+  "include": [
+    "bin/**/*.ts",
+    "bin/**/*.mts",
+    "lib/**/*.ts",
+    "lib/**/*.mts",
+    "src/**/*.ts",
+    "src/**/*.mts"
+  ],
   "exclude": ["node_modules", "dist", "cdk.out"]
 }

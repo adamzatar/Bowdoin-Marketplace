@@ -18,10 +18,7 @@ import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
 
 // Local/internal utilities (relative paths to avoid alias resolution issues)
-import { withAuth, rateLimit, Handlers } from '@/src/server';
-import type { Session } from '@/src/server';
-
-const { auditEvent, jsonError } = Handlers;
+import { withAuth, rateLimit, auditEvent, jsonError } from '@/server';
 
 const JSON_NOSTORE = {
   'content-type': 'application/json; charset=utf-8',
@@ -39,8 +36,8 @@ const ParamsZ = z.object({ id: z.string().uuid() });
 const CursorZ = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}T.*Z_[0-9a-fA-F-]{36}$/u)
-  .transform((c) => {
-    const [iso, id] = c.split('_');
+  .transform((c: string) => {
+    const [iso, id] = c.split('_') as [string, string];
     return { sentAt: new Date(iso), id };
   });
 
@@ -63,6 +60,7 @@ function sanitizeMessage(input: string): string {
   let out = '';
   for (let i = 0; i < collapsed.length; i++) {
     const ch = collapsed[i];
+    if (!ch) continue;
     const code = ch.charCodeAt(0);
     // keep \n (10) and \t (9), drop other C0 controls (< 32) and DEL (127)
     if ((code < 32 && code !== 9 && code !== 10) || code === 127) continue;
@@ -128,8 +126,10 @@ function toDTO(m: {
 // ---------- GET /api/messages/threads/[id]/messages
 
 export const GET = withAuth()(async (req, ctx) => {
-  const session = ctx.session as Session & { user: { id: string } };
-  const viewerId = session.user.id;
+  const viewerId = ctx.userId ?? ctx.session?.user?.id;
+  if (typeof viewerId !== 'string' || viewerId.length === 0) {
+    return jsonError(401, 'unauthorized');
+  }
   const ip = getIpFromHeaders(req);
   const url = new URL(req.url);
   const pathname = url.pathname;
@@ -185,10 +185,13 @@ export const GET = withAuth()(async (req, ctx) => {
 
     const hasMore = items.length > q.data.limit;
     const page = hasMore ? items.slice(0, q.data.limit) : items;
-
-    const nextCursor = hasMore
-      ? `${page[page.length - 1].sentAt.toISOString()}_${page[page.length - 1].id}`
-      : null;
+    let nextCursor: string | null = null;
+    if (hasMore) {
+      const last = page[page.length - 1];
+      if (last) {
+        nextCursor = `${last.sentAt.toISOString()}_${last.id}`;
+      }
+    }
 
     const data = page.map(toDTO);
 
@@ -204,8 +207,10 @@ export const GET = withAuth()(async (req, ctx) => {
 // ---------- POST /api/messages/threads/[id]/messages
 
 export const POST = withAuth()(async (req, ctx) => {
-  const session = ctx.session as Session & { user: { id: string } };
-  const viewerId = session.user.id;
+  const viewerId = ctx.userId ?? ctx.session?.user?.id;
+  if (typeof viewerId !== 'string' || viewerId.length === 0) {
+    return jsonError(401, 'unauthorized');
+  }
   const ip = getIpFromHeaders(req);
   const url = new URL(req.url);
   const pathname = url.pathname;
@@ -224,12 +229,9 @@ export const POST = withAuth()(async (req, ctx) => {
   const p = ParamsZ.safeParse({ id });
   if (!p.success) return jsonError(400, 'invalid_thread_id');
 
-  let bodyParsed: z.infer<typeof PostBodyZ>;
-  try {
-    bodyParsed = PostBodyZ.parse(await req.json());
-  } catch {
-    return jsonError(400, 'invalid_body');
-  }
+  const parsedBody = PostBodyZ.safeParse(await req.json());
+  if (!parsedBody.success) return jsonError(400, 'invalid_body');
+  const bodyParsed = parsedBody.data;
 
   const text = sanitizeMessage(bodyParsed.text);
   if (text.length === 0) return jsonError(400, 'empty_message');
@@ -258,7 +260,7 @@ export const POST = withAuth()(async (req, ctx) => {
     );
 
     try {
-      await auditEvent.emit('message.sent', {
+      await auditEvent('message.sent', {
         actor: { id: viewerId },
         target: { type: 'thread', id: created.threadId },
         meta: { messageId: created.id, length: created.body.length },

@@ -18,10 +18,8 @@ import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
 
 // Local/internal utilities (relative paths to avoid alias resolution issues)
-import { rateLimit, Handlers, Context } from '@/src/server';
-
-const { jsonError } = Handlers;
-const { getContext } = Context;
+import { rateLimit, jsonError } from '@/server';
+import { getContext } from '@/server/context';
 
 // type-only import placed after value imports to satisfy import/order
 import type { NextRequest } from 'next/server';
@@ -43,7 +41,7 @@ const QueryZ = z.object({
   sort: SortEnum.default('recent'),
   includeSold: z
     .union([z.literal('0'), z.literal('1')])
-    .transform((v) => v === '1')
+    .transform((value: '0' | '1') => value === '1')
     .optional(),
 });
 
@@ -111,14 +109,15 @@ function extractUser(session: unknown): SessionUserLike {
   if (!session || typeof session !== 'object') return undefined;
   const user = (session as { user?: unknown }).user;
   if (!user || typeof user !== 'object') return undefined;
-  const { id, affiliationVerified } = user as {
-    id?: unknown;
-    affiliationVerified?: unknown;
-  };
-  return {
-    id: typeof id === 'string' ? id : undefined,
-    affiliationVerified: affiliationVerified === true,
-  };
+  const result: Record<string, string | undefined | boolean> = {};
+  const candidate = user as { id?: unknown; affiliationVerified?: unknown };
+  if (typeof candidate.id === 'string') {
+    result.id = candidate.id;
+  }
+  if (candidate.affiliationVerified === true) {
+    result.affiliationVerified = true;
+  }
+  return result as SessionUserLike;
 }
 
 function toPublic(row: ListingDbRow): ListingPublic {

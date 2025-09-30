@@ -3,21 +3,43 @@
   "private": true,
   "type": "module",
   "sideEffects": false,
+  "version": "0.0.0",
+  "packageManager": "pnpm@10.0.0",
   "engines": {
-    "node": ">=18.18.0",
-    "pnpm": ">=8.0.0"
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
   },
   "scripts": {
+    "//_note": "Build-first wrappers keep dist/bin/bm.js current before every CDK action.",
     "clean": "rimraf dist cdk.out || rm -rf dist cdk.out",
+    "clean:all": "pnpm run clean && rimraf .tsbuildinfo || true",
     "build": "tsc -p tsconfig.json",
     "watch": "tsc -w -p tsconfig.json",
-    "cdk": "cdk -a \"node dist/bin/bm.js\"",
-    "synth": "pnpm build && cdk synth -a \"node dist/bin/bm.js\"",
-    "diff": "pnpm build && cdk diff -a \"node dist/bin/bm.js\"",
-    "deploy": "pnpm build && cdk deploy --require-approval never -a \"node dist/bin/bm.js\"",
-    "destroy": "cdk destroy -a \"node dist/bin/bm.js\"",
-    "bootstrap": "cdk bootstrap -a \"node dist/bin/bm.js\"",
-    "format": "prettier -w ."
+
+    "cdk": "cdk -a \"node --enable-source-maps dist/bin/bm.js\"",
+    "doctor": "pnpm run build && cdk doctor",
+    "list": "pnpm run build && cdk list -a \"node --enable-source-maps dist/bin/bm.js\"",
+
+    "bootstrap": "pnpm run build && cdk bootstrap -a \"node --enable-source-maps dist/bin/bm.js\"",
+    "synth": "pnpm run build && cdk synth -a \"node --enable-source-maps dist/bin/bm.js\"",
+    "diff": "pnpm run build && cdk diff -a \"node --enable-source-maps dist/bin/bm.js\"",
+    "deploy": "pnpm run build && cdk deploy -a \"node --enable-source-maps dist/bin/bm.js\" --require-approval=never",
+    "destroy": "cdk destroy -a \"node --enable-source-maps dist/bin/bm.js\"",
+
+    "//_ctx_note": "Context-aware variants; pass env: ENABLE_CLOUDFRONT=true|false, ROOT_DOMAIN, APP_SUBDOMAIN, AWS_REGION (defaults in CI).",
+    "bootstrap:ctx": "pnpm run build && cdk bootstrap -a \"node --enable-source-maps dist/bin/bm.js\" -c enableCloudFront=${ENABLE_CLOUDFRONT:-false} -c rootDomain=${ROOT_DOMAIN:-} -c appSubdomain=${APP_SUBDOMAIN:-} -c region=${AWS_REGION:-us-east-1}",
+    "synth:ctx": "pnpm run build && cdk synth -a \"node --enable-source-maps dist/bin/bm.js\" -c enableCloudFront=${ENABLE_CLOUDFRONT:-false} -c rootDomain=${ROOT_DOMAIN:-} -c appSubdomain=${APP_SUBDOMAIN:-} -c region=${AWS_REGION:-us-east-1}",
+    "diff:ctx": "pnpm run build && cdk diff -a \"node --enable-source-maps dist/bin/bm.js\" -c enableCloudFront=${ENABLE_CLOUDFRONT:-false} -c rootDomain=${ROOT_DOMAIN:-} -c appSubdomain=${APP_SUBDOMAIN:-} -c region=${AWS_REGION:-us-east-1} || true",
+    "deploy:ctx": "pnpm run build && cdk deploy -a \"node --enable-source-maps dist/bin/bm.js\" -c enableCloudFront=${ENABLE_CLOUDFRONT:-false} -c rootDomain=${ROOT_DOMAIN:-} -c appSubdomain=${APP_SUBDOMAIN:-} -c region=${AWS_REGION:-us-east-1} --require-approval=never",
+
+    "//_cf_off_shortcuts": "Convenience toggles when you simply want CloudFront disabled.",
+    "synth:cf-off": "pnpm run synth -- -c enableCloudFront=false",
+    "diff:cf-off": "pnpm run diff -- -c enableCloudFront=false || true",
+    "deploy:cf-off": "pnpm run deploy -- -c enableCloudFront=false",
+
+    "format": "prettier -w .",
+    "format:check": "prettier -c .",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "aws-cdk-lib": "2.217.0",
@@ -25,10 +47,9 @@
   },
   "devDependencies": {
     "@types/node": "24.5.2",
-    "ts-node": "10.9.2",
-    "typescript": "5.9.2",
-    "esbuild": "0.25.10",
+    "aws-cdk": "2.217.0",
     "prettier": "^3.3.3",
-    "rimraf": "^6.0.1"
+    "rimraf": "^6.0.1",
+    "typescript": "5.9.2"
   }
 }

@@ -1,21 +1,33 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "jsx": "preserve",
-    "allowJs": false,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "noEmit": true,
     "strict": true,
+    "target": "ES2022",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "./src/*",
+        "./*"
+      ]
+    },
+    "jsx": "preserve",
+    "types": [
+      "node",
+      "react",
+      "react-dom"
+    ],
+    "verbatimModuleSyntax": true,
     "exactOptionalPropertyTypes": true,
     "skipLibCheck": true,
-    "verbatimModuleSyntax": true,
-    "types": [
-      "node"
-    ],
+    "resolveJsonModule": true,
+    "allowJs": true,
     "incremental": true,
     "plugins": [
       {
@@ -24,12 +36,18 @@
     ]
   },
   "include": [
-    "next-env.d.ts",
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "components/**/*.ts",
+    "components/**/*.tsx",
+    "hooks/**/*.ts",
+    "hooks/**/*.tsx",
+    "lib/**/*.ts",
+    "lib/**/*.tsx",
     "src/**/*.ts",
     "src/**/*.tsx",
-    "src/types/**/*.d.ts",
-    ".next/types/**/*.ts",
-    "src/types/shims.d.ts"
+    "next-env.d.ts",
+    ".next/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

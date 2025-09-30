@@ -17,10 +17,7 @@ import { env } from '@bowdoin/config/env';
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
 
-
-import { requireSession, rateLimit, Handlers } from '@/src/server';
-
-const { emitAuditEvent, jsonError } = Handlers;
+import { withAuth, rateLimit, auditEvent, jsonError } from '@/server';
 
 import type { NextRequest } from 'next/server';
 
@@ -108,18 +105,17 @@ function toPublic(listing: ListingRecord) {
   return obj;
 }
 
-export async function POST(_req: NextRequest, ctx: { params: { id: string } }) {
-  const auth = await requireSession();
-  if (!auth.ok) return auth.error;
-  const { session } = auth;
-  if (!session?.user?.id) return jsonError(401, 'unauthorized');
+export const POST = withAuth<{ params: { id: string } }>()(async (_req, ctx) => {
+  const session = ctx.session;
+  const userId = ctx.userId ?? session?.user?.id;
+  if (!userId) return jsonError(401, 'unauthorized');
 
   const parsedId = IdParamZ.safeParse(ctx.params);
   if (!parsedId.success) return jsonError(400, 'invalid_id');
   const id = parsedId.data.id;
 
   try {
-    await rateLimit(`rl:listings:mark_sold:${session.user.id}`, 20, 3600);
+    await rateLimit(`rl:listings:mark_sold:${userId}`, 20, 3600);
   } catch {
     return jsonError(429, 'Too many requests');
   }
@@ -135,7 +131,7 @@ export async function POST(_req: NextRequest, ctx: { params: { id: string } }) {
   });
 
   if (!existing) return jsonError(404, 'listing_not_found');
-  if (existing.userId !== session.user.id) return jsonError(403, 'forbidden');
+  if (existing.userId !== userId) return jsonError(403, 'forbidden');
 
   if (existing.status === 'SOLD') {
     const already = await prisma.listing.findUnique({
@@ -157,8 +153,8 @@ export async function POST(_req: NextRequest, ctx: { params: { id: string } }) {
       select: listingSelect,
     });
 
-    emitAuditEvent('listing.mark_sold', {
-      actor: { type: 'user', id: session.user.id },
+    auditEvent('listing.mark_sold', {
+      actor: { type: 'user', id: userId },
       listingId: id,
       title: existing.title,
       sold: true,
@@ -169,11 +165,11 @@ export async function POST(_req: NextRequest, ctx: { params: { id: string } }) {
       headers: noStoreHeaders,
     });
   } catch (err) {
-    emitAuditEvent('listing.mark_sold_failed', {
-      actor: { type: 'user', id: session.user.id },
+    auditEvent('listing.mark_sold_failed', {
+      actor: { type: 'user', id: userId },
       listingId: id,
       error: err instanceof Error ? err.message : String(err),
     }).catch(() => {});
     return jsonError(500, 'failed_to_mark_sold');
   }
-}
+});

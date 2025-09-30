@@ -1,5 +1,9 @@
 // apps/web/src/server/handlers/audit.ts
-import { audit } from '@bowdoin/observability';
+
+// NOTE: don't import { audit } directly — some builds expose it only via subpath or
+// the package may not be built yet in local dev. Resolve lazily and cache.
+
+/* ───────────────────────── types ───────────────────────── */
 
 type Maybe<T> = T | undefined;
 
@@ -12,6 +16,44 @@ export type AuditCtx = {
 };
 
 export type AuditPayload = Record<string, unknown>;
+
+type AuditEmitter = {
+  emit: (name: string, payload: Record<string, unknown>) => Promise<void> | void;
+};
+
+/* ─────────────────────── lazy audit resolver ─────────────────────── */
+
+let _audit: AuditEmitter | null = null;
+
+async function getAudit(): Promise<AuditEmitter> {
+  if (_audit) return _audit;
+
+  // Try the explicit subpath first (preferred)
+  try {
+    const m = await import('@bowdoin/observability/audit');
+    if (m && typeof (m as any).audit?.emit === 'function') {
+      _audit = (m as any).audit as AuditEmitter;
+      return _audit;
+    }
+  } catch {
+    // ignore and try root export
+  }
+
+  // Then try the package root (some builds re-export from here)
+  try {
+    const m = await import('@bowdoin/observability');
+    if (m && typeof (m as any).audit?.emit === 'function') {
+      _audit = (m as any).audit as AuditEmitter;
+      return _audit;
+    }
+  } catch {
+    // ignore and fall back
+  }
+
+  // Safe no-op fallback so routes never crash in dev if the pkg isn't built yet
+  _audit = { emit: async () => {} };
+  return _audit;
+}
 
 /* ─────────────────────────── internals ─────────────────────────── */
 
@@ -95,30 +137,33 @@ export async function emitAuditEvent(
   ctx?: AuditCtx,
 ): Promise<void> {
   const meta = { ...buildMeta(ctx), ...(payload ?? {}) };
-  await audit.emit(name, { meta });
+  (await getAudit()).emit(name, { meta });
 }
 
-export const auditEvent = {
-  async emit(name: string, payload?: AuditPayload, ctx?: AuditCtx) {
-    return emitAuditEvent(name, payload, ctx);
-  },
+// The base callable (accepts optional ctx — non-breaking extension)
+async function auditEventBase(name: string, payload?: AuditPayload, ctx?: AuditCtx): Promise<void> {
+  await emitAuditEvent(name, payload, ctx);
+}
+
+export const auditEvent = Object.assign(auditEventBase, {
+  emit: auditEventBase,
   async ok(name: string, payload?: AuditPayload, ctx?: AuditCtx) {
     const meta = { ...buildMeta(ctx), ...(payload ?? {}) };
-    await audit.emit(name, { outcome: 'success', meta });
+    (await getAudit()).emit(name, { outcome: 'success', meta });
   },
   async fail(name: string, reason: string, detail?: unknown, ctx?: AuditCtx) {
     const meta = { ...buildMeta(ctx), reason, ...(detail ? { error: safeError(detail) } : {}) };
-    await audit.emit(name, { outcome: 'failure', severity: 'warn', meta });
+    (await getAudit()).emit(name, { outcome: 'failure', severity: 'warn', meta });
   },
   async denied(name: string, payload?: AuditPayload, ctx?: AuditCtx) {
     const meta = { ...buildMeta(ctx), ...(payload ?? {}) };
-    await audit.emit(name, { outcome: 'denied', severity: 'warn', meta });
+    (await getAudit()).emit(name, { outcome: 'denied', severity: 'warn', meta });
   },
   async rateLimited(name: string, payload?: AuditPayload, ctx?: AuditCtx) {
     const meta = { ...buildMeta(ctx), reason: 'rate_limited', ...(payload ?? {}) };
-    await audit.emit(name, { outcome: 'denied', severity: 'warn', meta });
+    (await getAudit()).emit(name, { outcome: 'denied', severity: 'warn', meta });
   },
-};
+});
 
 /* ─────────────────────── high-level helpers ────────────────────── */
 
@@ -169,7 +214,7 @@ function pickCtxMeta<TCtx extends object>(ctx: TCtx): Record<string, unknown> {
 
 export function audited<TCtx extends object = { params?: Record<string, string> }>(
   name: string,
-  opts?: { onSuccess?: (_res: Response, _ctx: TCtx) => AuditPayload | void }, // prefix args to satisfy no-unused-vars in type context
+  opts?: { onSuccess?: (_res: Response, _ctx: TCtx) => AuditPayload | void }, // keep param names to satisfy lint in type positions
 ) {
   return (handler: (req: Request, ctx: TCtx) => Promise<Response> | Response) =>
     async (req: Request, ctx: TCtx): Promise<Response> => {

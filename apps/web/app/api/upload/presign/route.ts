@@ -15,9 +15,7 @@ import crypto from 'node:crypto';
 
 import { env } from '@bowdoin/config/env';
 import { z } from 'zod';
-import { withAuth, rateLimit, Handlers } from '@/src/server';
-
-const { auditEvent: audit, jsonError } = Handlers;
+import { withAuth, rateLimit, auditEvent, jsonError } from '@/server';
 
 // ----- Zod
 
@@ -39,8 +37,6 @@ const PresignRespZ = z.object({
     maxBytes: z.number().int().positive(),
   }),
 });
-
-type PresignResp = z.infer<typeof PresignRespZ>;
 
 const noStoreHeaders = {
   'content-type': 'application/json; charset=utf-8',
@@ -148,12 +144,11 @@ export const POST = withAuth()(async (req, ctx) => {
     return jsonError(429, 'Too many requests');
   }
 
-  let body: z.infer<typeof BodyZ>;
-  try {
-    body = BodyZ.parse(await req.json());
-  } catch {
+  const parsedBody = BodyZ.safeParse(await req.json());
+  if (!parsedBody.success) {
     return jsonError(400, 'invalid_body');
   }
+  const body = parsedBody.data;
 
   const region = env.S3_REGION ?? 'us-east-1';
   const bucket = env.S3_BUCKET;
@@ -210,7 +205,7 @@ export const POST = withAuth()(async (req, ctx) => {
     'X-Amz-Signature': signature,
   };
 
-  await audit.emit('upload.presign', {
+  await auditEvent('upload.presign', {
     actor: { id: viewerId },
     target: { type: 's3', id: bucket },
     meta: { region, keyPrefix: keyPrefix.slice(0, 64), contentType: body.contentType, maxBytes: body.maxBytes },
@@ -218,7 +213,7 @@ export const POST = withAuth()(async (req, ctx) => {
     outcome: 'success',
   });
 
-  const resp: PresignResp = {
+  const resp = {
     ok: true,
     data: {
       url: `https://${bucket}.s3.${region}.amazonaws.com/`,

@@ -19,9 +19,7 @@ import process from 'node:process';
 
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
-import { withAuth, rateLimit, Handlers } from '@/src/server';
-
-const { jsonError } = Handlers;
+import { withAuth, rateLimit, jsonError } from '@/server';
 
 // ===== Response DTOs (local, minimal, contracts-free)
 
@@ -55,7 +53,7 @@ const ThreadDetailZ = z.object({
   updatedAt: z.date(),
   createdAt: z.date(),
 });
-type ThreadDetail = z.infer<typeof ThreadDetailZ>;
+type ThreadDetail = ReturnType<(typeof ThreadDetailZ)['parse']>;
 
 // ===== Utilities
 
@@ -145,7 +143,7 @@ function toDetailPayload(input: {
 
   if (process.env.NODE_ENV !== 'production') {
     try {
-      ThreadDetailZ.parse(payload);
+    ThreadDetailZ.parse(payload);
     } catch {
       // Non-fatal during development; CI/type checks catch drift
     }
@@ -245,12 +243,9 @@ export const PATCH = withAuth()(async (req, ctx) => {
   const parsedId = ParamsZ.safeParse({ id: idRaw });
   if (!parsedId.success) return jsonError(400, 'invalid_thread_id');
 
-  let body: z.infer<typeof PatchBodyZ>;
-  try {
-    body = PatchBodyZ.parse(await req.json());
-  } catch {
-    return jsonError(400, 'invalid_body');
-  }
+  const parsedBody = PatchBodyZ.safeParse(await req.json());
+  if (!parsedBody.success) return jsonError(400, 'invalid_body');
+  const body = parsedBody.data;
 
   const thread = await prisma.thread.findFirst({
     where: {

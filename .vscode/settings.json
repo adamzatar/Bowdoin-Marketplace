@@ -1,23 +1,74 @@
 {
+  // ---- TypeScript: use workspace SDK + keep TS Server lean in a monorepo
   "typescript.tsdk": "node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "typescript.tsserver.maxTsServerMemory": 4096,
   "typescript.tsserver.experimental.enableProjectDiagnostics": false,
+  "typescript.tsserver.watchOptions": {
+    "watchFile": "useFsEvents",
+    "watchDirectory": "useFsEvents",
+    "fallbackPolling": "dynamicPriority"
+  },
   "typescript.preferences.autoImportFileExcludePatterns": ["**/node_modules/**"],
   "typescript.disableAutomaticTypeAcquisition": true,
+
+  // ---- JavaScript type acquisition off (perf)
   "javascript.disableAutomaticTypeAcquisition": true,
+
+  // ---- ESLint (flat config) + VS Code integration
+  "eslint.useFlatConfig": true,
   "eslint.workingDirectories": [{ "mode": "auto" }],
-  "eslint.validate": [
-    "javascript",
-    "javascriptreact",
-    "typescript",
-    "typescriptreact"
-  ],
+  "eslint.validate": ["javascript", "javascriptreact", "typescript", "typescriptreact"],
   "eslint.problems.shortenToSingleLine": true,
+  "eslint.runtime": "node",
+  "eslint.lintTask.enable": true,
+
+  // Run ESLint fixes explicitly on save (no surprise auto-fixes)
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit"
+  },
+
+  // ---- Prettier as the default formatter
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true,
+  "[json]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+  "[jsonc]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+  "[markdown]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+  "[javascript]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+  "[javascriptreact]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+  "[typescript]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+  "[typescriptreact]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+
+  // ---- Search & file watching exclusions (keep CPU/RAM low)
   "search.exclude": {
     "**/node_modules": true,
-    "**/.pnpm": true
+    "**/.pnpm": true,
+    "**/dist": true,
+    "**/.next": true,
+    "**/cdk.out": true,
+    "**/coverage": true
   },
   "files.watcherExclude": {
     "**/node_modules/**": true,
-    "**/.pnpm/**": true
-  }
+    "**/.pnpm/**": true,
+    "**/dist/**": true,
+    "**/.next/**": true,
+    "**/cdk.out/**": true,
+    "**/coverage/**": true
+  },
+
+  // ---- Editor ergonomics
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "editor.tabSize": 2,
+  "editor.detectIndentation": false,
+  "editor.rulers": [100],
+  "editor.renderWhitespace": "selection",
+  "editor.quickSuggestions": {
+    "strings": true
+  },
+
+  // ---- Terminal (optional quality-of-life)
+  "terminal.integrated.defaultProfile.osx": "zsh",
+  "terminal.integrated.scrollback": 5000
 }

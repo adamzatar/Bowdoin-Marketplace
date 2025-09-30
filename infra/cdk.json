@@ -1,5 +1,5 @@
 {
-  "app": "node dist/bin/bm.js",
+  "app": "node --enable-source-maps dist/bin/bm.js",
   "versionReporting": true,
   "requireApproval": "never",
   "context": {

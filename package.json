@@ -6,15 +6,15 @@
   "description": "Bowdoin & Brunswick community marketplace — monorepo with Next.js (App Router), API, and shared backend packages.",
   "license": "MIT",
   "author": "Bowdoin Marketplace Team",
-  "packageManager": "pnpm@9.0.0",
+  "packageManager": "pnpm@10.17.1",
   "scripts": {
-    "dev": "pnpm --filter apps/web dev",
+    "dev": "pnpm --filter web dev",
+    "start": "pnpm --filter web start",
     "build": "pnpm -r --stream run build",
     "build:all": "pnpm run -r build",
-    "start": "pnpm --filter apps/web start",
-    "lint": "pnpm run prep:types && eslint .",
-    "lint:fix": "eslint . --fix",
     "typecheck": "tsc -p tsconfig.base.json --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest --passWithNoTests",
     "test:coverage": "vitest run --coverage",
@@ -23,7 +23,6 @@
     "format:fix": "prettier --write .",
     "changeset": "changeset",
     "release": "changeset version && pnpm install --no-frozen-lockfile && changeset publish",
-    "format:check": "prettier --check .",
     "prepare": "husky",
     "clean": "pnpm -r --stream --if-present run clean",
     "cleanall": "pnpm -r --stream --if-present run clean && rimraf node_modules pnpm-lock.yaml && pnpm store prune",
@@ -31,32 +30,22 @@
   },
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    "infra"
   ],
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=10.0.0"
+  },
   "devDependencies": {
     "@changesets/cli": "^2.29.6",
-    "@eslint/eslintrc": "^2",
-    "@eslint/js": "^8.57.1",
-    "@testing-library/jest-dom": "^6.5.0",
-    "@testing-library/react": "^15.0.0",
+    "@eslint/js": "^9.36.0",
     "@types/node": "^20.19.17",
-    "@typescript-eslint/eslint-plugin": "^8.44.0",
-    "@typescript-eslint/parser": "^8.44.0",
     "@vitest/ui": "^2.1.9",
-    "aws-cdk-lib": "2.217.0",
-    "constructs": "10.4.2",
-    "esbuild": "0.25.10",
-    "eslint": "^8.57.1",
-    "eslint-config-prettier": "^9.1.2",
+    "eslint": "^9.36.0",
     "eslint-import-resolver-node": "^0.3.9",
-    "eslint-import-resolver-typescript": "^4.4.4",
-    "eslint-plugin-import": "^2.32.0",
-    "eslint-plugin-import-x": "^4.16.1",
-    "eslint-plugin-jsx-a11y": "^6.10.2",
-    "eslint-plugin-react": "^7.37.5",
-    "eslint-plugin-react-hooks": "^5.2.0",
-    "eslint-plugin-react-refresh": "^0.4.20",
-    "eslint-plugin-security": "^2.1.1",
+    "eslint-import-resolver-typescript": "^4.4.1",
+    "eslint-plugin-import": "^2.29.1",
     "husky": "^9.0.10",
     "lint-staged": "^15.2.0",
     "playwright": "^1.45.0",
@@ -65,24 +54,10 @@
     "prettier-plugin-prisma": "^5.0.0",
     "prettier-plugin-tailwindcss": "^0.6.14",
     "rimraf": "^6.0.1",
-    "ts-node": "^10.9.2",
-    "tsconfig-paths": "^4.2.0",
     "tsup": "^8.5.0",
     "typescript": "^5.9.2",
-    "typescript-eslint": "^8.44.1",
+    "typescript-eslint": "^8.8.0",
     "vitest": "^2.1.9"
-  },
-  "lint-staged": {
-    "*.{ts,tsx,js,jsx,json,css,md}": [
-      "prettier --write"
-    ],
-    "*.{ts,tsx,js,jsx}": [
-      "eslint --fix"
-    ]
-  },
-  "engines": {
-    "node": ">=18.17.0",
-    "pnpm": ">=9.0.0"
   },
   "dependencies": {
     "@bowdoin/email": "workspace:^",
@@ -105,5 +80,13 @@
     "prisma": "^6.16.2",
     "redis": "^4.6.13",
     "undici": "^7.15.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx,json,css,md}": [
+      "prettier --write"
+    ],
+    "*.{ts,tsx,js,jsx}": [
+      "eslint --fix"
+    ]
   }
 }

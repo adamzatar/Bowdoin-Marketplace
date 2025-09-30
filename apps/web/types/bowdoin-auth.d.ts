@@ -13,5 +13,13 @@ declare module '@bowdoin/auth/utils/email-token-store' {
   export class EmailTokenStore {
     create(opts: IssueOptions): Promise<IssueResult>;
     issue?(opts: IssueOptions): Promise<IssueResult>; // tolerate older name
+    consume(token: string): Promise<{
+      userId: string;
+      email: string;
+      purpose: string;
+      issuedAt: number;
+      expiresAt: number;
+    }>;
+    verifyAndConsume?(opts: { userId: string; email: string; token: string }): Promise<boolean>;
   }
 }

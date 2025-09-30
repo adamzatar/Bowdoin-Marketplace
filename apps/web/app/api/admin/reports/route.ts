@@ -17,10 +17,7 @@ export const revalidate = 0;
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
 
-import { withAuth, rateLimit, Handlers } from '@/src/server';
-import type { Session } from '@/src/server';
-
-const { auditEvent: audit, jsonError } = Handlers;
+import { withAuth, rateLimit, auditEvent, jsonError } from '@/server';
 
 import type { Prisma } from '@prisma/client';
 
@@ -34,22 +31,26 @@ const JSON_NOSTORE = {
   vary: 'Cookie',
 };
 
-type MaybeSessionUser = Session['user'];
+function isAdminish(user: unknown): boolean {
+  if (!user || typeof user !== 'object') return false;
 
-function isAdminish(user: MaybeSessionUser): user is NonNullable<MaybeSessionUser> {
-  if (!user) return false;
+  const candidate = user as {
+    role?: unknown;
+    roles?: unknown;
+    permissions?: unknown;
+  };
 
-  const role = typeof user.role === 'string' ? user.role : null;
-  const roles = Array.isArray(user.roles) ? user.roles.filter(Boolean) : [];
-  const permissions = Array.isArray((user as Record<string, unknown>).permissions)
-    ? ((user as Record<string, unknown>).permissions as string[])
-    : [];
+  const role = typeof candidate.role === 'string' ? candidate.role : null;
+  const roles = Array.isArray(candidate.roles) ? candidate.roles : [];
+  const permissions = Array.isArray(candidate.permissions) ? candidate.permissions : [];
 
   return (
     role === 'admin' ||
-    roles.includes('admin') ||
-    permissions.includes('admin:read') ||
-    permissions.includes('admin:write')
+    roles.some((r) => String(r).toLowerCase() === 'admin') ||
+    permissions.some((p) => {
+      const value = String(p).toLowerCase();
+      return value === 'admin:read' || value === 'admin:write';
+    })
   );
 }
 
@@ -77,9 +78,8 @@ const BulkResolveBodyZ = z.object({
 
 export const GET = withStrictAuth(async (req, ctx) => {
   const user = ctx.session?.user;
-  if (!isAdminish(user) || !user.id) return jsonError(403, 'forbidden');
-
-  const userId = String(user.id);
+  const userId = typeof user?.id === 'string' ? user.id : null;
+  if (!userId || !isAdminish(user)) return jsonError(403, 'forbidden');
 
   try {
     await Promise.all([
@@ -147,9 +147,8 @@ export const GET = withStrictAuth(async (req, ctx) => {
 
 export const POST = withStrictAuth(async (req, ctx) => {
   const user = ctx.session?.user;
-  if (!isAdminish(user) || !user.id) return jsonError(403, 'forbidden');
-
-  const userId = String(user.id);
+  const userId = typeof user?.id === 'string' ? user.id : null;
+  if (!userId || !isAdminish(user)) return jsonError(403, 'forbidden');
 
   try {
     await Promise.all([
@@ -160,12 +159,11 @@ export const POST = withStrictAuth(async (req, ctx) => {
     return jsonError(429, 'too_many_requests');
   }
 
-  let body: z.infer<typeof BulkResolveBodyZ>;
-  try {
-    body = BulkResolveBodyZ.parse(await req.json());
-  } catch {
+  const parsedBody = BulkResolveBodyZ.safeParse(await req.json());
+  if (!parsedBody.success) {
     return jsonError(400, 'invalid_request_body');
   }
+  const body = parsedBody.data;
 
   const updated = await prisma.report.updateMany({
     where: { id: { in: body.ids }, status: 'OPEN' },
@@ -174,7 +172,7 @@ export const POST = withStrictAuth(async (req, ctx) => {
     },
   });
 
-  await audit.emit('admin.report.bulk_resolve', {
+  await auditEvent('admin.report.bulk_resolve', {
     actor: { id: userId },
     target: { type: 'report.bulk', id: body.ids.join(',') },
     meta: { count: updated.count, note: body.note, ip: ctx.ip, route: '/api/admin/reports' },

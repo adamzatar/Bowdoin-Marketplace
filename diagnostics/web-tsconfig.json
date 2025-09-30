@@ -7,7 +7,7 @@
             "dom.iterable"
         ],
         "module": "esnext",
-        "moduleResolution": "bundler",
+        "moduleResolution": "Bundler",
         "moduleDetection": "force",
         "verbatimModuleSyntax": true,
         "resolveJsonModule": true,

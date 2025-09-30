@@ -13,9 +13,7 @@ import { headers } from 'next/headers';
 
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
-import { requireSession, rateLimit, Handlers } from '@/src/server';
-
-const { emitAuditEvent, jsonError } = Handlers;
+import { withAuth, rateLimit, auditEvent, jsonError } from '@/server';
 
 import type { Prisma } from '@prisma/client';
 
@@ -186,9 +184,11 @@ export async function GET(req: Request) {
   let items = rows;
   let nextCursor: string | null = null;
   if (rows.length > limit) {
-    const next = rows[rows.length - 1];
-    nextCursor = next.id;
-    items = rows.slice(0, limit);
+    const next = rows[rows.length - 1] ?? null;
+    if (next) {
+      nextCursor = next.id;
+      items = rows.slice(0, limit);
+    }
   }
 
   const data = items.map(formatListing);
@@ -200,11 +200,9 @@ export async function GET(req: Request) {
 }
 
 /** POST /api/listings */
-export async function POST(req: Request) {
-  const auth = await requireSession();
-  if (!auth.ok) return auth.error;
-
-  const { userId } = auth;
+export const POST = withAuth()(async (req, ctx) => {
+  const userId = ctx.userId ?? ctx.session?.user?.id;
+  if (!userId) return jsonError(401, 'unauthorized');
 
   try {
     await rateLimit(`rl:listings:create:${userId}`, 10, 60);
@@ -249,7 +247,7 @@ export async function POST(req: Request) {
     const listing = formatListing(created);
 
     const priceCents = Math.round(listing.price * 100);
-    emitAuditEvent('listing.created', {
+    auditEvent('listing.created', {
       actor: { type: 'user', id: userId },
       listingId: listing.id,
       priceCents,
@@ -264,10 +262,10 @@ export async function POST(req: Request) {
       headers: noStore,
     });
   } catch (err) {
-    emitAuditEvent('listing.create_failed', {
+    auditEvent('listing.create_failed', {
       actor: { type: 'user', id: userId },
       error: err instanceof Error ? err.message : String(err),
     }).catch(() => {});
     return jsonError(500, 'failed to create listing');
   }
-}
+});

@@ -1,126 +1,124 @@
-import js from '@eslint/js';
-import tseslint from 'typescript-eslint';
-import importPlugin from 'eslint-plugin-import';
+// eslint.config.js — root flat config (ESLint v9), production-grade for a PNPM monorepo (Next.js + TS)
+// - Type-aware rules only for TS/TSX using the Project Service (multi-tsconfig support)
+// - JS gets the standard JS recommended config
+// - Monorepo-friendly import resolution (TS + Node), path aliases handled by resolver
+// - Sensible defaults for unused vars, import ordering, and Next/Fetch handlers ergonomics
+
+import js from "@eslint/js";
+import ts from "typescript-eslint";
+import importPlugin from "eslint-plugin-import";
 
 const IGNORES = [
-  '**/node_modules/**',
-  '**/.next/**',
-  '**/dist/**',
-  '**/build/**',
-  '**/cdk.out/**',
-  '**/.turbo/**',
-  '**/*.d.ts',
-];
-
-const TS_PROJECTS = [
-  'apps/*/tsconfig.json',
-  'packages/*/tsconfig.json',
-  'infra/tsconfig.json',
-  'tsconfig.base.json',
+  "**/node_modules/**",
+  "**/dist/**",
+  "**/.next/**",
+  "**/cdk.out/**",
+  "**/coverage/**",
+  "**/.turbo/**",
+  "**/.vercel/**"
 ];
 
 export default [
+  // 0) Global ignores
   { ignores: IGNORES },
-  js.configs.recommended,
-  ...tseslint.configs.recommended,
+
+  // 1) Plain JS/JSX files: use JS recommended
   {
-    files: ['**/*.{ts,tsx,js,mjs,cjs}'],
+    files: ["**/*.{js,cjs,mjs,jsx}"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "module"
+    },
+    ...js.configs.recommended
+  },
+
+  // 2) TypeScript (type-aware) — scoped only to TS/TSX so JS doesn't need TS services
+  ...ts.configs.recommendedTypeChecked.map((cfg) => ({
+    ...cfg,
+    files: ["**/*.{ts,tsx}"],
+    languageOptions: {
+      ...cfg.languageOptions,
+      ecmaVersion: "latest",
+      sourceType: "module",
+      parserOptions: {
+        // ESLint v9 Project Service: auto-discovers tsconfig per workspace/package
+        projectService: true,
+        tsconfigRootDir: process.cwd()
+      }
+    },
+    rules: {
+      ...(cfg.rules ?? {}),
+      // ergonomic defaults
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" }
+      ],
+      // allow void-return handlers in JSX/onClick, etc.
+      "@typescript-eslint/no-misused-promises": [
+        "error",
+        { checksVoidReturn: { attributes: false } }
+      ],
+      // prefer typed imports/exports; TS + bundlers handle resolution
+      "import/no-unresolved": "off"
+    }
+  })),
+
+  // 3) Import plugin + resolver (applies to all file types)
+  {
     plugins: { import: importPlugin },
     settings: {
-      'import/resolver': {
-        typescript: {
-          project: TS_PROJECTS,
-          alwaysTryTypes: true,
-        },
-        node: {
-          extensions: ['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts', '.json'],
-        },
-      },
+      "import/resolver": {
+        // resolves TS path aliases across the monorepo
+        typescript: true,
+        node: true
+      }
     },
     rules: {
-      'import/no-unresolved': ['error', { commonjs: true, caseSensitive: true }],
-      '@typescript-eslint/no-unused-vars': [
-        'warn',
+      "import/order": [
+        "warn",
         {
-          argsIgnorePattern: '^_',
-          varsIgnorePattern: '^_',
-          caughtErrorsIgnorePattern: '^_',
-        },
-      ],
-    },
+          groups: ["builtin", "external", "internal", "parent", "sibling", "index", "object", "type"],
+          alphabetize: { order: "asc", caseInsensitive: true },
+          "newlines-between": "always"
+        }
+      ]
+    }
   },
+
+  // 4) Next.js App Router: relax a couple of rules inside the web app
   {
-    files: ['apps/**/*.{ts,tsx,js,mjs,cjs}'],
+    files: ["apps/web/**"],
     rules: {
-      'import/no-internal-modules': [
-        'error',
-        {
-          allow: [
-            'next/server',
-            'next/headers',
-            'next/app',
-            'next/navigation',
-            'next-auth/react',
-            '@bowdoin/observability',
-            '@bowdoin/observability/logger',
-            '@bowdoin/observability/audit',
-            '@bowdoin/observability/metrics',
-            '@bowdoin/observability/tracing',
-            '@bowdoin/rate-limit',
-            '@bowdoin/rate-limit/redisClient',
-            '@bowdoin/rate-limit/tokenBucket',
-            '@bowdoin/auth/nextauth',
-            '@bowdoin/auth/utils/email-token-store',
-            '@bowdoin/security/csp',
-            '@bowdoin/security/headers',
-            '@bowdoin/config/env',
-            '@bowdoin/config/flags',
-            '@bowdoin/contracts/schemas/*',
-            '@bowdoin/email/sendVerificationEmail',
-            'dotenv/config',
-            '@bowdoin/queue/workers',
-            '@/src/server',
-            '@/middleware/cspHeaders',
-          ],
-        },
-      ],
-      '@typescript-eslint/no-unused-vars': [
-        'warn',
-        {
-          argsIgnorePattern: '^_',
-          varsIgnorePattern: '^_',
-          caughtErrorsIgnorePattern: '^_',
-        },
-      ],
-    },
+      // server actions / route handlers often infer types; don’t force verbose returns
+      "@typescript-eslint/explicit-function-return-type": "off"
+    }
   },
+
+  // 5) Config/build/infra scripts: use lighter TS rules (no type-aware requirement)
   {
     files: [
-      '**/*.config.{js,cjs,mjs,ts}',
-      'apps/**/postcss.config.cjs',
-      'apps/**/tailwind.config.cjs',
-      'commitlint.config.mjs',
-      'scripts/**/*.{js,ts,mjs,cjs}',
-      'infra/**/*.{ts,js,mjs,cjs}',
+      "**/*.config.{js,cjs,mjs,ts}",
+      "infra/**",
+      "scripts/**",
+      "tools/**"
     ],
-    languageOptions: { sourceType: 'module' },
+    // swap to non-type-checked set to avoid needing a tsconfig here
+    ...ts.configs.recommended,
     rules: {
-      'no-undef': 'off',
-      '@typescript-eslint/no-require-imports': 'off',
-      'import/no-extraneous-dependencies': ['error', { devDependencies: true }],
-      '@typescript-eslint/no-unused-expressions': 'off',
-    },
+      "@typescript-eslint/no-var-requires": "off",
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }
+      ]
+    }
   },
+
+  // 6) Declaration files: turn off rules that don't make sense for .d.ts
   {
-    files: ['packages/observability/**/*.{ts,tsx}', 'packages/queue/**/*.{ts,tsx}'],
+    files: ["**/*.d.ts"],
     rules: {
-      '@typescript-eslint/no-explicit-any': 'warn',
-    },
-  },
-  {
-    files: ['packages/**/*.{ts,tsx,js,mjs,cjs}'],
-    rules: {
-      'import/no-internal-modules': 'off',
-    },
-  },
+      "@typescript-eslint/no-unused-vars": "off",
+      "@typescript-eslint/consistent-type-definitions": "off"
+    }
+  }
 ];

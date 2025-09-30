@@ -17,10 +17,8 @@ export const revalidate = 0;
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
 
-import { withAuth, rateLimit, Handlers } from '@/src/server';
-import type { Session } from '@/src/server';
-
-const { jsonError } = Handlers;
+import { withAuth, rateLimit, jsonError } from '@/server';
+import type { Session } from '@/server';
 
 import type { Prisma } from '@prisma/client';
 
@@ -71,10 +69,6 @@ type ThreadSummary = {
   updatedAt: Date;
   createdAt: Date;
 };
-
-function ensureUser(user: MaybeSessionUser | undefined): user is NonNullable<MaybeSessionUser> {
-  return Boolean(user?.id);
-}
 
 function toThreadSummary(
   thread: {
@@ -129,8 +123,8 @@ function toThreadSummary(
 
 export const GET = withStrictAuth(async (req, ctx) => {
   const user = ctx.session?.user;
-  if (!ensureUser(user)) return jsonError(403, 'forbidden');
-  const viewerId = String(user.id);
+  const viewerId = typeof user?.id === 'string' ? user.id : null;
+  if (!viewerId) return jsonError(403, 'forbidden');
 
   try {
     await Promise.all([
@@ -198,8 +192,8 @@ export const GET = withStrictAuth(async (req, ctx) => {
 
 export const POST = withStrictAuth(async (req, ctx) => {
   const user = ctx.session?.user;
-  if (!ensureUser(user)) return jsonError(403, 'forbidden');
-  const viewerId = String(user.id);
+  const viewerId = typeof user?.id === 'string' ? user.id : null;
+  if (!viewerId) return jsonError(403, 'forbidden');
 
   try {
     await Promise.all([
@@ -211,12 +205,9 @@ export const POST = withStrictAuth(async (req, ctx) => {
     return jsonError(429, 'too_many_requests');
   }
 
-  let body: z.infer<typeof CreateBodyZ>;
-  try {
-    body = CreateBodyZ.parse(await req.json());
-  } catch {
-    return jsonError(400, 'invalid_body');
-  }
+  const parsedBody = CreateBodyZ.safeParse(await req.json());
+  if (!parsedBody.success) return jsonError(400, 'invalid_body');
+  const body = parsedBody.data;
 
   const listing = await prisma.listing.findUnique({
     where: { id: body.listingId },
