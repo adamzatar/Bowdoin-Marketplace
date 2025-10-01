@@ -121,37 +121,45 @@ jobs:
             echo "  APP_SUBDOMAIN='${APP_SUBDOMAIN}'"
           fi
 
-      # Deterministic per-package build with logs (replaces bulk recursive build)
       - name: Build packages (deterministic with per-package logs)
         run: |
           set -euo pipefail
+
+          # Sanitize APP_SUBDOMAIN when it arrives as the literal string ""
+          if [[ "${APP_SUBDOMAIN:-}" == '""' ]]; then
+            APP_SUBDOMAIN=""
+            echo "Sanitized APP_SUBDOMAIN -> <empty>"
+          fi
 
           echo "::group::Enumerate packages under ./packages (topo order)"
           pnpm m ls -r --json > /tmp/ws.json
           node -e '
             const fs=require("fs");
             const data=JSON.parse(fs.readFileSync("/tmp/ws.json","utf8"));
-            // keep only workspaces under packages/**
             const pkgs=data.filter(p => (p.path || "").includes("/packages/"));
             for (const p of pkgs) console.log(`${p.name}\t${p.path}`);
-          ' | tee /tmp/ws.txt
+          ' > /tmp/ws.txt
+          cat /tmp/ws.txt
           echo "::endgroup::"
 
           fails=0
           while IFS=$'\t' read -r NAME PATH; do
-            [ -z "$NAME" ] && continue
+            [[ -z "$NAME" ]] && continue
             echo ""
             echo "=== BUILD >> ${NAME} @ ${PATH}"
-            # normalize log filename
             LOG="build-${NAME//@/_}.log"
-            # run build in package dir, capture all output
-            if ! pnpm --dir "$PATH" run build 2>&1 | tee "$LOG"; then
+            if pnpm --dir "$PATH" run build >"$LOG" 2>&1; then
+              echo "OK: ${NAME}"
+            else
               echo "!! FAILED: ${NAME}"
               fails=$((fails+1))
+              echo "----- tail ${LOG} -----"
+              tail -n 200 "$LOG" || true
+              echo "----- end tail -----"
             fi
-          done </tmp/ws.txt
+          done < /tmp/ws.txt
 
-          if [ "$fails" -ne 0 ]; then
+          if [[ "$fails" -ne 0 ]]; then
             echo "::error::$fails package build(s) failed"
             exit 1
           fi
