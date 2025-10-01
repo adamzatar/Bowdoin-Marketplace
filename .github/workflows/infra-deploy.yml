@@ -7,7 +7,6 @@ on:
       - "infra/**"
       - ".github/workflows/infra-deploy.yml"
       - "pnpm-lock.yaml"
-      - "package.json"
       - "pnpm-workspace.yaml"
   workflow_dispatch:
     inputs:
@@ -93,88 +92,14 @@ jobs:
           pnpm config set fetch-retry-maxtimeout 60000
           pnpm config set fetch-retry-mintimeout 5000
 
-      - name: Install deps (retry; allow lock refresh)
+      - name: Install deps (infra only; allow lock refresh)
         run: |
           set -euo pipefail
-          n=0
-          until [ $n -ge 3 ]; do
-            if pnpm install --no-frozen-lockfile; then
-              exit 0
-            fi
-            n=$((n+1))
-            echo "pnpm install failed (attempt $n). Retrying in 10s..."
-            sleep 10
-          done
-          echo "::error::pnpm install failed after 3 attempts"
-          exit 1
+          pnpm install --no-frozen-lockfile --filter ./infra...
 
-      - name: Workspace topology
-        run: |
-          pnpm -r list --depth -1 || true
-          echo
-          echo "repo vars:"
-          echo "  AWS_OIDC_ROLE_ARN=${AWS_OIDC_ROLE_ARN:-<unset>}"
-          echo "  ROOT_DOMAIN=${ROOT_DOMAIN:-<unset>}"
-          if [[ -z "${APP_SUBDOMAIN+x}" ]]; then
-            echo "  APP_SUBDOMAIN=<unset> (apex)"
-          else
-            echo "  APP_SUBDOMAIN='${APP_SUBDOMAIN}'"
-          fi
-
-      - name: Build packages (deterministic with per-package logs)
-        run: |
-          set -euo pipefail
-
-          # Sanitize APP_SUBDOMAIN when it arrives as the literal string ""
-          if [[ "${APP_SUBDOMAIN:-}" == '""' ]]; then
-            APP_SUBDOMAIN=""
-            echo "Sanitized APP_SUBDOMAIN -> <empty>"
-          fi
-
-          echo "::group::Enumerate packages under ./packages (topo order)"
-          pnpm m ls -r --json > /tmp/ws.json
-          node -e '
-            const fs=require("fs");
-            const data=JSON.parse(fs.readFileSync("/tmp/ws.json","utf8"));
-            const pkgs=data.filter(p => (p.path || "").includes("/packages/"));
-            for (const p of pkgs) console.log(`${p.name}\t${p.path}`);
-          ' > /tmp/ws.txt
-          cat /tmp/ws.txt
-          echo "::endgroup::"
-
-          fails=0
-          while IFS=$'\t' read -r NAME PATH; do
-            [[ -z "$NAME" ]] && continue
-            echo ""
-            echo "=== BUILD >> ${NAME} @ ${PATH}"
-            LOG="build-${NAME//@/_}.log"
-            if pnpm --dir "$PATH" run build >"$LOG" 2>&1; then
-              echo "OK: ${NAME}"
-            else
-              echo "!! FAILED: ${NAME}"
-              fails=$((fails+1))
-              echo "----- tail ${LOG} -----"
-              tail -n 200 "$LOG" || true
-              echo "----- end tail -----"
-            fi
-          done < /tmp/ws.txt
-
-          if [[ "$fails" -ne 0 ]]; then
-            echo "::error::$fails package build(s) failed"
-            exit 1
-          fi
-
-      - name: Upload per-package build logs (always)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pnpm-build-logs
-          path: |
-            build-*.log
-            **/pnpm-debug.log
-            pnpm-debug.log
-          if-no-files-found: warn
-          retention-days: 7
+      - name: Build infra only
+        working-directory: infra
+        run: pnpm run build
 
       - name: Preflight — required values present
         run: |
@@ -185,10 +110,9 @@ jobs:
               missing=1
             fi
           done
-          if [[ -z "${APP_SUBDOMAIN+x}" ]]; then
-            echo "::notice::APP_SUBDOMAIN is not set; using apex (${ROOT_DOMAIN})"
-          else
-            echo "APP_SUBDOMAIN='${APP_SUBDOMAIN}'"
+          if [[ "${APP_SUBDOMAIN:-}" == '""' ]]; then
+            APP_SUBDOMAIN=""
+            echo "Sanitized APP_SUBDOMAIN -> <empty>"
           fi
           if [[ "$missing" -ne 0 ]]; then
             echo "Define repo variables in Settings → Variables → Actions:"
@@ -218,7 +142,7 @@ jobs:
           pnpm run synth -- \
             -c enableCloudFront="$ENABLE_CLOUDFRONT" \
             -c rootDomain="$ROOT_DOMAIN" \
-            -c appSubdomain="$APP_SUBDOMAIN" \
+            -c appSubdomain="${APP_SUBDOMAIN:-}" \
             -c region="$AWS_REGION"
 
       - name: Upload synthesized templates
@@ -235,7 +159,7 @@ jobs:
           pnpm run diff -- \
             -c enableCloudFront="$ENABLE_CLOUDFRONT" \
             -c rootDomain="$ROOT_DOMAIN" \
-            -c appSubdomain="$APP_SUBDOMAIN" \
+            -c appSubdomain="${APP_SUBDOMAIN:-}" \
             -c region="$AWS_REGION" || true
 
       - name: CDK deploy
@@ -244,7 +168,7 @@ jobs:
           pnpm run deploy -- \
             -c enableCloudFront="$ENABLE_CLOUDFRONT" \
             -c rootDomain="$ROOT_DOMAIN" \
-            -c appSubdomain="$APP_SUBDOMAIN" \
+            -c appSubdomain="${APP_SUBDOMAIN:-}" \
             -c region="$AWS_REGION" \
             --require-approval=never
 
