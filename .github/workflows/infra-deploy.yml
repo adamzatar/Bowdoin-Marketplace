@@ -115,11 +115,49 @@ jobs:
             echo "Sanitized APP_SUBDOMAIN -> <empty>"
           fi
           if [[ "$missing" -ne 0 ]]; then
-            echo "Define repo variables in Settings → Variables → Actions:"
+            echo "Define repo variables in Settings → Actions → Variables:"
             echo "  • AWS_OIDC_ROLE_ARN (e.g., arn:aws:iam::<ACCOUNT_ID>:role/BowdoinCdkDeployRole)"
             echo "  • ROOT_DOMAIN (e.g., bowdoinmarketplace.com)"
             exit 1
           fi
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # OIDC CLAIMS DEBUG — read GitHub's runtime env (no ${{ env.* }} indirection)
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Debug OIDC token claims
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+            echo "::error::ACTIONS_ID_TOKEN_REQUEST_* env not available (check permissions: id-token: write)."
+            env | sort | sed -n '1,80p' || true
+            exit 1
+          fi
+
+          RESP="$(curl -sS -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")"
+
+          JWT="$(echo "$RESP" | jq -r .value || true)"
+          if [[ -z "${JWT:-}" || "$JWT" == "null" ]]; then
+            echo "::error::Failed to obtain OIDC token"
+            echo "$RESP"
+            exit 1
+          fi
+
+          PAYLOAD_B64="$(echo "$JWT" | cut -d'.' -f2)"
+          MOD=$(( ${#PAYLOAD_B64} % 4 ))
+          if [ $MOD -eq 2 ]; then PAYLOAD_B64="${PAYLOAD_B64}==";
+          elif [ $MOD -eq 3 ]; then PAYLOAD_B64="${PAYLOAD_B64}="; fi
+
+          CLAIMS="$(echo "$PAYLOAD_B64" | tr '_-' '/+' | base64 -d 2>/dev/null || true)"
+
+          echo "::group::OIDC JWT claims (decoded payload)"
+          echo "$CLAIMS" | jq .
+          echo "::endgroup::"
+
+          echo "aud:  $(echo "$CLAIMS" | jq -r .aud)"
+          echo "repo: $(echo "$CLAIMS" | jq -r .repository)"
+          echo "sub:  $(echo "$CLAIMS" | jq -r .sub)"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
