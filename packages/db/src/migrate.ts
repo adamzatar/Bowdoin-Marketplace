@@ -19,7 +19,8 @@
 
 import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
 import { env } from '@bowdoin/config/env';
 import { logger } from '@bowdoin/observability/logger';
@@ -36,26 +37,25 @@ type Command = 'deploy' | 'status' | 'generate' | 'reset' | 'push';
 const isProd = env.NODE_ENV === 'production';
 const FORCE = process.env.FORCE === '1';
 
-function ensureDatabaseUrl() {
-  if (!env.DATABASE_URL) {
-    const msg =
-      'DATABASE_URL is not set. Aborting. Provide a valid Postgres connection string in env.';
+function assertDatabaseUrl(): string {
+  const url = env.DATABASE_URL;
+  if (!url) {
+    const msg = 'DATABASE_URL is not set. Aborting. Provide a valid Postgres connection string in env.';
     logger.error({ msg });
-    process.stderr.write(`${msg}\n`);
-    process.exit(2);
+    throw new Error(msg);
   }
+  return url;
 }
 
-function forbidInProdUnlessForced(cmd: Command) {
+function assertPermitted(cmd: Command) {
   if (isProd && (cmd === 'reset' || cmd === 'push') && !FORCE) {
     const msg = `Refusing to run '${cmd}' in production. Set FORCE=1 if you really intend to do this.`;
     logger.error({ msg, cmd, isProd, FORCE });
-    process.stderr.write(`${msg}\n`);
-    process.exit(3);
+    throw new Error(msg);
   }
 }
 
-function runPrisma(args: string[]): Promise<number> {
+function runPrisma(args: string[], databaseUrl: string): Promise<number> {
   return new Promise((resolveExit) => {
     const child = spawn(
       process.platform === 'win32' ? 'npx.cmd' : 'npx',
@@ -65,7 +65,7 @@ function runPrisma(args: string[]): Promise<number> {
         stdio: 'inherit',
         env: {
           ...process.env,
-          DATABASE_URL: env.DATABASE_URL,
+          DATABASE_URL: databaseUrl,
           NODE_ENV: env.NODE_ENV,
         },
       },
@@ -77,38 +77,47 @@ function runPrisma(args: string[]): Promise<number> {
   });
 }
 
-async function main() {
+async function main(): Promise<void> {
   const [, , rawCmd] = process.argv;
   const cmd = (rawCmd as Command) || 'status';
 
-  ensureDatabaseUrl();
+  const databaseUrl = assertDatabaseUrl();
 
   switch (cmd) {
     case 'deploy': {
       logger.info({ msg: 'Applying pending migrations (prisma migrate deploy)…', schema: PRISMA_SCHEMA });
-      const code = await runPrisma(['migrate', 'deploy']);
-      if (code !== 0) process.exit(code);
+      const code = await runPrisma(['migrate', 'deploy'], databaseUrl);
+      if (code !== 0) {
+        process.exitCode = code;
+        return;
+      }
       logger.info({ msg: 'Migrations deployed successfully.' });
       break;
     }
 
     case 'status': {
       logger.info({ msg: 'Checking migration status (prisma migrate status)…' });
-      const code = await runPrisma(['migrate', 'status']);
-      if (code !== 0) process.exit(code);
+      const code = await runPrisma(['migrate', 'status'], databaseUrl);
+      if (code !== 0) {
+        process.exitCode = code;
+        return;
+      }
       break;
     }
 
     case 'generate': {
       logger.info({ msg: 'Generating Prisma client (prisma generate)…' });
-      const code = await runPrisma(['generate']);
-      if (code !== 0) process.exit(code);
+      const code = await runPrisma(['generate'], databaseUrl);
+      if (code !== 0) {
+        process.exitCode = code;
+        return;
+      }
       logger.info({ msg: 'Prisma client generated.' });
       break;
     }
 
     case 'reset': {
-      forbidInProdUnlessForced(cmd);
+      assertPermitted(cmd);
       logger.warn({
         msg: 'RESETTING DATABASE (prisma migrate reset)… This WILL DROP all data.',
         FORCE,
@@ -116,20 +125,26 @@ async function main() {
       const args = ['migrate', 'reset', '--force'];
       // Allow running seed after reset if you want: remove --skip-seed to enable seeding script
       if (process.env.SKIP_SEED === '1') args.push('--skip-seed');
-      const code = await runPrisma(args);
-      if (code !== 0) process.exit(code);
+      const code = await runPrisma(args, databaseUrl);
+      if (code !== 0) {
+        process.exitCode = code;
+        return;
+      }
       logger.info({ msg: 'Database reset complete.' });
       break;
     }
 
     case 'push': {
-      forbidInProdUnlessForced(cmd);
+      assertPermitted(cmd);
       logger.warn({
         msg: 'Applying schema changes with prisma db push (DEV ONLY). Prefer migrations for prod.',
         FORCE,
       });
-      const code = await runPrisma(['db', 'push']);
-      if (code !== 0) process.exit(code);
+      const code = await runPrisma(['db', 'push'], databaseUrl);
+      if (code !== 0) {
+        process.exitCode = code;
+        return;
+      }
       logger.info({ msg: 'db push completed.' });
       break;
     }
@@ -140,13 +155,15 @@ async function main() {
         `Usage: ts-node src/migrate.ts <deploy|status|generate|reset|push>`;
       logger.error({ msg, rawCmd });
       process.stderr.write(`${msg}\n`);
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
   }
 }
 
 main().catch((err) => {
   logger.error({ msg: 'Migration runner crashed', err });
-  process.stderr.write(`Migration error: ${(err as Error).message}\n`);
-  process.exit(1);
+  const message = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`Migration error: ${message}\n`);
+  process.exitCode = process.exitCode ?? 1;
 });

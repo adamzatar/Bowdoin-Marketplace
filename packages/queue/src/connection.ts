@@ -3,7 +3,7 @@
 import { env } from '@bowdoin/config/env';
 import { logger } from '@bowdoin/observability/logger';
 import { diag, trace } from '@opentelemetry/api';
-import { Queue, Worker, QueueScheduler, type JobsOptions, type Processor } from 'bullmq';
+import { Queue, Worker, type JobsOptions, type Processor } from 'bullmq';
 import IORedis, { type Redis, type RedisOptions } from 'ioredis';
 
 const tracer = trace.getTracer('queue');
@@ -40,7 +40,7 @@ function maskUrl(url: string) {
 type Role = 'client' | 'subscriber';
 
 /** Build ioredis options from env with sane defaults */
-function buildRedisOptions(role: Role): RedisOptions {
+function buildRedisOptions(_role: Role): RedisOptions {
   // Highest precedence: REDIS_URL (includes auth/tls)
   if (env.REDIS_URL) {
     return {
@@ -53,24 +53,23 @@ function buildRedisOptions(role: Role): RedisOptions {
   }
 
   // Host/port style
-  const tls =
-    env.REDIS_TLS === 'true'
-      ? {
-          rejectUnauthorized: env.REDIS_TLS_REJECT_UNAUTHORIZED !== 'false',
-        }
-      : undefined;
-
   return {
-    host: env.REDIS_HOST || '127.0.0.1',
-    port: env.REDIS_PORT ? Number(env.REDIS_PORT) : 6379,
-    username: env.REDIS_USERNAME || undefined,
-    password: env.REDIS_PASSWORD || undefined,
+    host: env.REDIS_HOST ?? '127.0.0.1',
+    port: env.REDIS_PORT ?? 6379,
     lazyConnect: true,
     maxRetriesPerRequest: null,
     enableReadyCheck: true,
     ...(env.NODE_ENV === 'production' ? { enableOfflineQueue: false } : {}),
-    tls,
-  };
+    ...(env.REDIS_USERNAME ? { username: env.REDIS_USERNAME } : {}),
+    ...(env.REDIS_PASSWORD ? { password: env.REDIS_PASSWORD } : {}),
+    ...(env.REDIS_TLS === 'true'
+      ? {
+          tls: {
+            rejectUnauthorized: env.REDIS_TLS_REJECT_UNAUTHORIZED !== 'false',
+          },
+        }
+      : {}),
+  } satisfies RedisOptions;
 }
 
 /** Create a single Redis connection */
@@ -140,7 +139,7 @@ export type QueueFactoryOptions = {
   defaultJobOptions?: JobsOptions;
 };
 
-/** Create a queue + scheduler pair with sane, productiony defaults. */
+/** Create a queue with sane, productiony defaults. */
 export function createQueue<T = unknown>(
   name: string,
   options: QueueFactoryOptions = {},
@@ -148,7 +147,7 @@ export function createQueue<T = unknown>(
   const prefix = options.prefix ?? 'bmq';
   const connection = bullConnection();
 
-  const queue = new Queue<T>(name, {
+  return new Queue<T>(name, {
     connection,
     prefix,
     defaultJobOptions: {
@@ -159,17 +158,6 @@ export function createQueue<T = unknown>(
       ...(options.defaultJobOptions ?? {}),
     },
   });
-
-  const scheduler = new QueueScheduler(name, {
-    connection,
-    prefix,
-  });
-
-  scheduler.on('failed', (jobId, err) => {
-    log.error({ queue: name, jobId, err }, 'QueueScheduler failed job');
-  });
-
-  return { queue, scheduler };
 }
 
 export type WorkerFactoryOptions = {
@@ -231,7 +219,7 @@ export function createWorker<T = unknown, R = unknown>(
   }, {
     connection,
     prefix,
-    concurrency: options.concurrency ?? Math.max(1, Number(env.WORKER_CONCURRENCY ?? 4)),
+    concurrency: options.concurrency ?? Math.max(1, env.WORKER_CONCURRENCY ?? 4),
   });
 
   worker.on('failed', (job, err) => {
@@ -245,7 +233,7 @@ export function createWorker<T = unknown, R = unknown>(
     worker.on('active', (job) => {
       log.debug({ queue: name, jobId: job.id }, 'Worker active');
     });
-    worker.on('stalled', (jobId) => {
+  worker.on('stalled', (jobId: string) => {
       log.warn({ queue: name, jobId }, 'Worker stalled');
     });
   }

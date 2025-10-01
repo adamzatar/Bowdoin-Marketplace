@@ -1,26 +1,33 @@
 // apps/web/app/api/users/verification/request/route.ts
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 import process from 'node:process';
-import { env } from '@bowdoin/config';
+import { env } from '@bowdoin/config/env';
 import { audit } from '@bowdoin/observability/audit';
 import { logger } from '@bowdoin/observability/logger';
 import { getRedisClient } from '@bowdoin/rate-limit/redisClient';
 import { consume as consumeTokenBucket } from '@bowdoin/rate-limit/tokenBucket';
-import { sendVerificationEmail } from '@bowdoin/email/sendVerificationEmail';
 import { authOptions } from '@bowdoin/auth/nextauth';
 import { headers } from 'next/headers';
 import { getServerSession } from 'next-auth';
-import { z, type ZodIssue } from 'zod';
+import { z } from 'zod';
 import type { NextRequest } from 'next/server';
-
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
 
 const BodySchema = z
   .object({
     email: z.string().trim().email('must be a valid email address'),
   })
   .strict();
+
+type SessionUserWithId = {
+  id: string;
+} & Record<string, unknown>;
+
+function hasUserId(user: { id?: unknown } | null | undefined): user is SessionUserWithId {
+  return typeof user?.id === 'string' && user.id.length > 0;
+}
 
 function jsonError(status: number, code: string, extra?: Record<string, unknown>): Response {
   return new Response(JSON.stringify({ ok: false, error: code, ...(extra ?? {}) }, null, 0), {
@@ -95,8 +102,9 @@ async function rateLimit(key: string, limit: number, windowSec: number): Promise
 
 export async function POST(req: NextRequest): Promise<Response> {
   const session = await getServerSession(authOptions);
-  const userId = session?.user?.id;
-  if (!userId) return jsonError(401, 'unauthorized');
+  const user = session?.user;
+  if (!hasUserId(user)) return jsonError(401, 'unauthorized');
+  const userId = user.id;
 
   const hdrs = headers();
   const ip = ipFromHeaders(hdrs);
@@ -110,15 +118,14 @@ export async function POST(req: NextRequest): Promise<Response> {
     return jsonError(429, 'rate_limited', { retryAfterSec: 60 });
   }
 
-  let body: z.infer<typeof BodySchema>;
-  try {
-    const json = (await req.json()) as unknown;
-    body = BodySchema.parse(json);
-  } catch (err) {
-    const message =
-      err instanceof z.ZodError ? err.errors.map((e: ZodIssue) => e.message).join('; ') : 'invalid JSON';
+  const json = (await req.json()) as unknown;
+  const parsedBody = BodySchema.safeParse(json);
+  if (!parsedBody.success) {
+    const issues = parsedBody.error.errors as Array<{ message: string }>;
+    const message = issues.map((issue) => issue.message).join('; ');
     return jsonError(400, 'bad_request', { message });
   }
+  const body = parsedBody.data;
 
   const allow = parseAllowDomains();
   if (!isAllowedDomain(body.email, allow)) {
@@ -130,11 +137,16 @@ export async function POST(req: NextRequest): Promise<Response> {
   const { EmailTokenStore } = await import('@bowdoin/auth/utils/email-token-store');
   const store = new EmailTokenStore();
   const ttlSeconds = parseTokenTtlSeconds();
-  const { token, expiresAt } = await store.create({
+  type TokenCreateResult = {
+    token: string;
+    expiresAt: Date | number | string;
+  };
+
+  const { token, expiresAt } = (await store.create({
     userId,
     email: body.email,
     ttlSeconds,
-  });
+  })) as TokenCreateResult;
 
   const expDate =
     expiresAt instanceof Date
@@ -142,6 +154,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       : new Date(typeof expiresAt === 'number' ? expiresAt * 1000 : Date.parse(String(expiresAt)));
 
   try {
+    const { sendVerificationEmail } = await import('@bowdoin/email/sendVerificationEmail');
     await sendVerificationEmail({
       to: body.email,
       token,

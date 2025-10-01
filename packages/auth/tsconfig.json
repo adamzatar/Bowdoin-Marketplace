@@ -8,7 +8,7 @@
     "module": "ESNext",
     "target": "ES2022",
     "lib": ["ES2022"],
-    "moduleResolution": "bundler",
+    "moduleResolution": "Bundler",
 
     "composite": true,
     "declaration": true,
@@ -28,7 +28,6 @@
     "baseUrl": ".",
     "paths": {}
   },
-  "files": [],
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",
@@ -42,5 +41,10 @@
     "**/*.spec.ts",
     "**/__tests__/**",
     "**/__mocks__/**"
+  ],
+  "references": [
+    { "path": "../email" },
+    { "path": "../rate-limit" },
+    { "path": "../config/tsconfig.src.json" }
   ]
 }

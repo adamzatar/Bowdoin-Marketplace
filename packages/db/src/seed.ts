@@ -5,7 +5,8 @@
  * Safe to run multiple times (idempotent where possible).
  */
 
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
+import process from 'node:process';
 
 import { logger } from '@bowdoin/observability/logger';
 import { PrismaClient } from '@prisma/client';
@@ -16,7 +17,7 @@ async function seed() {
   logger.info('🌱 Starting database seeding...');
 
   // ---------------------------------------------------------------------------
-  // Example Users
+  // Example Users (keep to required fields; let DB defaults fill the rest)
   // ---------------------------------------------------------------------------
 
   const adminEmail = 'admin@bowdoin.edu';
@@ -29,8 +30,7 @@ async function seed() {
       id: randomUUID(),
       email: adminEmail,
       name: 'Admin User',
-      role: 'ADMIN',
-      affiliation: 'CAMPUS',
+      // role/affiliation/status omitted to avoid enum mismatch; defaults apply
     },
   });
 
@@ -41,10 +41,7 @@ async function seed() {
       id: randomUUID(),
       email: communityEmail,
       name: 'Community Tester',
-      role: 'USER',
-      affiliation: 'COMMUNITY',
-      communityEmail,
-      communityVerifiedAt: new Date(),
+      // omit affiliation/role/verification fields unless your schema defines them
     },
   });
 
@@ -54,7 +51,7 @@ async function seed() {
   );
 
   // ---------------------------------------------------------------------------
-  // Example Listings
+  // Example Listings (omit enum fields so schema defaults apply; use numbers for price)
   // ---------------------------------------------------------------------------
 
   await prisma.listing.createMany({
@@ -64,19 +61,16 @@ async function seed() {
         id: randomUUID(),
         title: 'Used Textbook - ECON101',
         description: 'Like new, $30',
-        price: 30,
-        status: 'ACTIVE',
-        sellerId: adminUser.id,
-        audience: 'CAMPUS',
+        price: 30,                 // number is fine for Decimal fields
+        userId: adminUser.id,
+        // status/audience omitted to avoid enum mismatch; defaults apply
       },
       {
         id: randomUUID(),
         title: 'Free Couch',
         description: 'Pickup in Brunswick',
         price: 0,
-        status: 'ACTIVE',
-        sellerId: communityUser.id,
-        audience: 'COMMUNITY',
+        userId: communityUser.id,
       },
     ],
   });
@@ -91,9 +85,9 @@ async function seed() {
 
 seed()
   .catch((err) => {
-    logger.error(err, '❌ Database seeding failed');
-    process.exit(1);
+    logger.error({ err }, '❌ Database seeding failed');
+    process.exitCode = 1;
   })
-  .finally(async () => {
-    await prisma.$disconnect();
+  .finally(() => {
+    void prisma.$disconnect();
   });

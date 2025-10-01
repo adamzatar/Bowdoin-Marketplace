@@ -5,16 +5,15 @@
  *  - Typed flag names inferred from DEFAULTS
  *  - Optional % rollout using a stable hash of an audienceKey
  *  - Env overrides via process.env.FLAG_<NAME>=0|1|true|false
- *  - Helpers: isEnabled(), allFlags()
+ *  - Helpers: isEnabled(), allFlags(), readOverride(), list()
  *
  * No runtime deps.
  */
 
 /* -----------------------------------------------------------------------------
- * Define defaults here. Add/remove flags as needed.
+ * Defaults — tweak for your app
  * --------------------------------------------------------------------------- */
 const DEFAULTS = {
-  // Example flags — customize for your app:
   NEW_LISTING_FLOW: false,
   ENABLE_SEARCH_V2: true,
   COMMUNITY_SIGNUP: true,
@@ -22,30 +21,38 @@ const DEFAULTS = {
 } as const;
 
 export type FlagName = keyof typeof DEFAULTS;
+export type FlagsRecord = Readonly<Record<FlagName, boolean>>;
 
-/* -----------------------------------------------------------------------------
- * Types
- * --------------------------------------------------------------------------- */
 export type AudienceKey = string | number;
 
 export interface FlagOptions {
-  /** Rollout percentage [0..100]; when provided, gates the flag on audienceKey hash */
+  /**
+   * Rollout percentage [0..100].
+   * When provided together with `audienceKey`, enables sticky bucketing.
+   */
   percent?: number;
-  /** Stable key for hashing (e.g., userId, IP) to keep bucket assignment sticky */
+  /**
+   * Stable audience key (e.g., userId or email hash) to keep bucket assignment sticky.
+   */
   audienceKey?: AudienceKey;
 }
 
 /* -----------------------------------------------------------------------------
+ * Safe env access (works in browser builds too — just returns undefined)
+ * --------------------------------------------------------------------------- */
+const ENV: Readonly<Record<string, string | undefined>> =
+  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+
+/* -----------------------------------------------------------------------------
  * Env overrides (FLAG_<NAME>=0|1|true|false)
  * --------------------------------------------------------------------------- */
-function readEnvOverride(name: FlagName): boolean | undefined {
-  const envKey = `FLAG_${name}`;
-  const raw = process.env[envKey];
-  if (raw === undefined) return undefined;
-  const v = String(raw).toLowerCase().trim();
-  if (v === "1" || v === "true") return true;
-  if (v === "0" || v === "false") return false;
-  return undefined;
+export function readOverride(name: FlagName): boolean | undefined {
+  const raw = ENV[`FLAG_${name}`];
+  if (raw == null) return undefined;
+  const v = String(raw).trim().toLowerCase();
+  if (v === '1' || v === 'true') return true;
+  if (v === '0' || v === 'false') return false;
+  return undefined; // ignore malformed values
 }
 
 /* -----------------------------------------------------------------------------
@@ -56,13 +63,10 @@ function bucketOf(key: AudienceKey): number {
   let hash = 5381;
   for (let i = 0; i < s.length; i++) {
     // hash * 33 ^ char
-     
     hash = ((hash << 5) + hash) ^ s.charCodeAt(i);
-    // Keep it in 32-bit range
-     
-    hash |= 0;
+    hash |= 0; // 32-bit
   }
-  const positive = Math.abs(hash);
+  const positive = hash === -2147483648 ? 0 : Math.abs(hash); // guard for MIN_INT
   return positive % 100; // 0..99
 }
 
@@ -72,58 +76,94 @@ function bucketOf(key: AudienceKey): number {
 
 /**
  * Check if a flag is enabled.
- * Order of precedence:
+ * Precedence:
  *  1) Env override FLAG_<NAME>=0|1|true|false
- *  2) If options.percent is provided AND audienceKey is provided => rollout gate
+ *  2) If both percent and audienceKey provided → rollout gate (sticky)
  *  3) DEFAULTS fallback
  */
 export function isEnabled(name: FlagName, opts?: FlagOptions): boolean {
   // 1) Env override
-  const override = readEnvOverride(name);
+  const override = readOverride(name);
   if (override !== undefined) return override;
 
-  // 2) % rollout (only if both percent and audienceKey provided)
+  // 2) % rollout (only if both provided and percent within [0, 100])
   if (
-    typeof opts?.percent === "number" &&
+    typeof opts?.percent === 'number' &&
     opts.percent >= 0 &&
     opts.percent <= 100 &&
     opts.audienceKey !== undefined
   ) {
-    const bucket = bucketOf(opts.audienceKey);
-    return bucket < Math.floor(opts.percent);
+    // bucket is 0..99, so percent=100 means always on
+    return bucketOf(opts.audienceKey) < Math.floor(opts.percent);
   }
 
   // 3) Default
   return DEFAULTS[name];
 }
 
-/** Convenience: typed list of all flag names. */
-export const ALL_FLAGS = Object.keys(DEFAULTS) as FlagName[];
-
 /**
- * Resolve all flags for a given audience.
- * Uses exact optional property types—no `undefined` properties are written.
+ * Resolve all flags for an optional audience (for sticky rollouts).
+ * Uses exactOptionalPropertyTypes patterns — no `undefined` props added.
  */
-export function allFlags(audienceKey?: AudienceKey): Record<FlagName, boolean> {
+export function allFlags(audienceKey?: AudienceKey): FlagsRecord {
   const out = {} as Record<FlagName, boolean>;
+  (Object.keys(DEFAULTS) as FlagName[]).forEach((name) => {
+    // You may add per-flag default rollout here if desired:
+    // const percent = name === 'NEW_LISTING_FLOW' ? 10 : undefined;
 
-  for (const n of ALL_FLAGS) {
-    // Build options without introducing `undefined` fields
-    const opts: { percent?: number; audienceKey?: AudienceKey } = {};
-    // Example: you can assign a default rollout percent per-flag here if desired:
-    // if (n === "NEW_LISTING_FLOW") opts.percent = 10;
+    const opts: FlagOptions = {};
+    if (audienceKey !== undefined) opts.audienceKey = audienceKey;
+    // if (percent !== undefined) opts.percent = percent;
 
-    if (audienceKey !== undefined) {
-      opts.audienceKey = audienceKey;
-    }
-
-    out[n] = isEnabled(n, opts);
-  }
-
-  return out;
+    out[name] = isEnabled(name, opts);
+  });
+  return Object.freeze(out);
 }
 
+/** Convenience: typed list of all flag names. */
+export const ALL_FLAGS = Object.freeze(Object.keys(DEFAULTS) as FlagName[]);
+
+/** Export defaults for tests/inspection. */
+export const DEFAULT_FLAG_VALUES: FlagsRecord = Object.freeze({ ...DEFAULTS });
+
 /* -----------------------------------------------------------------------------
- * Export defaults for convenience in consumers/tests
+ * Project-specific tweakables (keep colocated with flags)
  * --------------------------------------------------------------------------- */
-export const DEFAULT_FLAG_VALUES: Readonly<Record<FlagName, boolean>> = DEFAULTS;
+
+/**
+ * Misc numeric “flags” that aren’t boolean (kept minimal; no runtime deps).
+ * Example: VERIFY_CONFIRM_DELAY_MS — optional delay for UX polish in verification flows.
+ */
+function parsePositiveIntEnv(key: string, fallback = 0): number {
+  const raw = ENV[key];
+  if (!raw) return fallback;
+  const n = Number.parseInt(String(raw), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+export const flags = Object.freeze({
+  VERIFY_CONFIRM_DELAY_MS: parsePositiveIntEnv('VERIFY_CONFIRM_DELAY_MS', 0),
+});
+
+/* -----------------------------------------------------------------------------
+ * Tiny helpers for consumers that like a functional style
+ * --------------------------------------------------------------------------- */
+
+/**
+ * Create a resolver bound to a specific audience (avoids re-passing options).
+ */
+export function createFlagResolver(audienceKey: AudienceKey) {
+  return {
+    isEnabled: (name: FlagName, percent?: number) =>
+      isEnabled(name, percent !== undefined ? { percent, audienceKey } : { audienceKey }),
+    all: () => allFlags(audienceKey),
+  };
+}
+
+/**
+ * Human-readable dump of current flags (defaults + overrides applied for the audience).
+ */
+export function list(audienceKey?: AudienceKey): Array<{ name: FlagName; enabled: boolean }> {
+  const record = allFlags(audienceKey);
+  return ALL_FLAGS.map((name) => ({ name, enabled: record[name] }));
+}

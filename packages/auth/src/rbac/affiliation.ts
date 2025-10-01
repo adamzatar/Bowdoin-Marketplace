@@ -1,9 +1,7 @@
 // packages/auth/src/rbac/affiliation.ts
 
-import { logger } from "@bowdoin/observability/logger";
 import { emitAffiliationChange } from "@bowdoin/observability/audit";
-
-import type { Role } from "../rbac";
+import { logger } from "@bowdoin/observability/logger";
 
 import {
   deriveRoles,
@@ -13,6 +11,7 @@ import {
   normalizeRoles,
 } from "../rbac";
 
+import type { Role } from "../rbac";
 import type { Realm } from "@bowdoin/observability/audit";
 
 /** Canonical affiliation kinds used across the stack (DB, contracts, audit). */
@@ -131,7 +130,7 @@ export async function reconcileAffiliation(opts: {
   /** Optional additional audit metadata (IP, agent, actor, etc.). */
   auditMeta?: Record<string, unknown>;
 }): Promise<AffiliationDecision & { changed: boolean }> {
-  const { userId, currentAffiliated, signals, persist, auditMeta } = opts;
+  const { userId, currentAffiliated, signals, persist, auditMeta: _auditMeta } = opts;
 
   const decision = computeAffiliation(signals);
   const { changed, from, to } = diffAffiliation(

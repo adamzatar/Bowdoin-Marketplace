@@ -4,58 +4,50 @@
   "private": true,
   "type": "module",
   "sideEffects": false,
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
+      "import": "./dist/index.js"
     },
     "./env": {
       "types": "./dist/env.d.ts",
-      "default": "./dist/env.js"
+      "import": "./dist/env.js"
     },
     "./flags": {
       "types": "./dist/flags.d.ts",
-      "default": "./dist/flags.js"
-    },
-    "./src/env": {
-      "types": "./dist/env.d.ts",
-      "default": "./dist/env.js"
-    },
-    "./src/flags": {
-      "types": "./dist/flags.d.ts",
-      "default": "./dist/flags.js"
-    },
-    "./package.json": "./package.json"
+      "import": "./dist/flags.js"
+    }
   },
+
   "files": [
-    "dist",
-    "src"
+    "dist"
   ],
+
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "clean": "rimraf dist",
-    "lint": "eslint src --ext .ts,.tsx --max-warnings=0",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "prepublishOnly": "pnpm run clean && pnpm run build"
+    "clean": "rimraf dist || rm -rf dist",
+    "build": "pnpm run clean && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
+
   "dependencies": {
     "dotenv": "^16.4.5",
     "zod": "^3.23.8"
   },
+
   "devDependencies": {
-    "@types/node": "^20.19.13",
-    "@typescript-eslint/eslint-plugin": "^8.42.0",
-    "@typescript-eslint/parser": "^8.42.0",
-    "eslint": "^9.35.0",
-    "prettier": "^3",
-    "rimraf": "^6.0.1",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "rimraf": "^6.0.1"
   },
+
   "engines": {
-    "node": ">=20.11.1"
+    "node": ">=20.11.1",
+    "pnpm": ">=9.0.0"
   },
+
   "publishConfig": {
     "access": "restricted"
   }

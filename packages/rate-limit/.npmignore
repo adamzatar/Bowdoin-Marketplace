@@ -1,0 +1,7 @@
+tsconfig*.json
+vitest.config.*
+eslint.config.*
+.eslintrc*
+*.map
+src/**
+!src/**/*.d.ts

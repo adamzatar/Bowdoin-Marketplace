@@ -1,3 +1,4 @@
+/* eslint-env node */
 // packages/config/src/env.ts
 import 'dotenv/config';
 import { z } from 'zod';
@@ -17,18 +18,14 @@ const BoolishOptional = z.preprocess(
     }
     return v;
   },
-  z.boolean().optional()
+  z.boolean().optional(),
 );
 
 /**
- * Centralized runtime environment schema validation.
- * Ensures all required environment variables are present and typed correctly.
- *
- * NOTE: Many email-related keys are optional here so packages can reference them
- * without forcing you to set everything in every environment. Sensible fallbacks
- * are handled by the email/auth packages where appropriate.
+ * Strict runtime environment schema.
+ * Apps/services should call `validateEnv()` during bootstrap to enforce this.
  */
-const EnvSchema = z.object({
+const StrictEnvSchema = z.object({
   // Runtime
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
@@ -47,16 +44,29 @@ const EnvSchema = z.object({
 
   // Redis
   REDIS_URL: z.string().url(),
+  REDIS_HOST: z.string().optional(),
+  REDIS_PORT: z.coerce.number().int().positive().optional(),
+  REDIS_USERNAME: z.string().optional(),
+  REDIS_PASSWORD: z.string().optional(),
+  REDIS_TLS: z.enum(['true', 'false']).optional(),
+  REDIS_TLS_REJECT_UNAUTHORIZED: z.enum(['true', 'false']).optional(),
+
+  WORKER_CONCURRENCY: z.coerce.number().int().positive().optional(),
 
   // S3 / Storage
   S3_ENDPOINT: z.string().url().optional(),
-  S3_REGION: z.string(),
+  S3_REGION: z.string().optional(),
   S3_BUCKET: z.string(),
-  S3_ACCESS_KEY_ID: z.string(),
-  S3_SECRET_ACCESS_KEY: z.string(),
+  S3_ACCESS_KEY_ID: z.string().optional(),
+  S3_SECRET_ACCESS_KEY: z.string().optional(),
+  S3_FORCE_PATH_STYLE: z.enum(['true', 'false']).optional(),
+  S3_IMAGE_CACHE_CONTROL: z.string().optional(),
+  IMAGE_OUTPUT_FORMAT: z.enum(['webp', 'jpeg', 'png', 'avif']).optional(),
 
   // Email (SMTP defaults; SES supported via EMAIL_PROVIDER=ses)
   EMAIL_FROM: z.string().email(),
+  // Comma-separated domain allowlist; optional. Example: "bowdoin.edu,example.org"
+  ALLOWED_EMAIL_DOMAINS: z.string().optional(),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().int().positive().optional(),
   SMTP_USER: z.string().optional(),
@@ -65,9 +75,9 @@ const EnvSchema = z.object({
   SMTP_TLS_REJECT_UNAUTHORIZED: BoolishOptional,
 
   // Email provider selection + misc
-  EMAIL_PROVIDER: z.enum(["ses", "smtp", "log"]).default("log"),
+  EMAIL_PROVIDER: z.enum(['ses', 'smtp', 'log']).default('log'),
   EMAIL_SUPPORT_ADDRESS: z.string().email().optional(),
-  EMAIL_LINK_SIGNING_SECRET: z.string().optional(), 
+  EMAIL_LINK_SIGNING_SECRET: z.string().optional(),
   EMAIL_VALIDATE_TRANSPORT: BoolishOptional,
 
   // AWS region for SES (fallback to S3_REGION if unset)
@@ -80,25 +90,71 @@ const EnvSchema = z.object({
   // Feature Flags
   FEATURE_FLAGS: z.string().optional(), // e.g. "newMessaging,brunswickUsers"
 
-  RATE_LIMIT_MULTIPLIER: z.coerce.number().optional(),   // defaults handled in code
-  RATE_LIMITS_DISABLED: z.enum(["true", "false"]).optional(),
+  RATE_LIMIT_MULTIPLIER: z.coerce.number().optional(), // defaults handled in code
+  RATE_LIMITS_DISABLED: z.enum(['true', 'false']).optional(),
 });
 
-const parsed = EnvSchema.safeParse(process.env);
+/**
+ * Loose variant used at import-time to avoid throwing in build/CI contexts.
+ * Everything becomes optional, with the same coercions/defaults where defined.
+ */
+const LooseEnvSchema = StrictEnvSchema.partial();
 
-if (!parsed.success) {
-  // Print flattened errors for quick CI visibility without dumping all env
-  // eslint-disable-next-line no-console
-  console.error('❌ Invalid environment configuration:', parsed.error.flatten().fieldErrors);
-  throw new Error('Invalid environment variables');
+/** Canonical Env type (strict). */
+export type Env = z.infer<typeof StrictEnvSchema>;
+
+// Prefer direct process.env access; no globalThis gymnastics needed.
+const raw = process.env as Record<string, string | undefined>;
+
+/**
+ * Parse loosely at module import time so library builds & CI don’t crash
+ * when your full app env isn’t present.
+ */
+const looseParsed = LooseEnvSchema.safeParse(raw);
+
+if (!looseParsed.success) {
+  // Extremely unlikely with partial schema, but log just in case
+  console.warn(
+    '⚠️  Non-fatal: environment contains invalid shapes (loose parse).',
+    looseParsed.error.flatten().fieldErrors,
+  );
 }
 
-export const env = parsed.data;
+/**
+ * Export a best-effort `env` object for libraries/utilities that read optional values.
+ * NOTE: Do not rely on strict presence here; call `validateEnv()` in executables.
+ */
+export const env = (looseParsed.success ? looseParsed.data : {}) as Partial<Env> as Env;
+
+/**
+ * Helper: strict validation for app/worker/server entrypoints.
+ * Call early in your bootstrap (e.g., Next custom server, workers, CLI) to fail fast.
+ *
+ * You can also enforce strictness entirely via env: set CONFIG_STRICT=true.
+ */
+export function validateEnv(): Env {
+  const parsed = StrictEnvSchema.safeParse(raw);
+  if (!parsed.success) {
+    // Print flattened errors for quick CI visibility without dumping all env
+    console.error('❌ Invalid environment configuration:', parsed.error.flatten().fieldErrors);
+    throw new Error('Invalid environment variables');
+  }
+  return parsed.data;
+}
+
+/** Auto-enforce strict mode if explicitly requested. */
+if (process.env.CONFIG_STRICT === 'true') {
+  // Override `env` with strict data and throw on failure.
+  const strict = validateEnv();
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+  // @ts-ignore – overwrite the exported binding for consumers after this point
+  (exports as unknown as { env: Env }).env = strict;
+}
 
 /**
  * Helper: parse feature flags into a Set for O(1) checks.
  * Example: FEATURE_FLAGS="newMessaging,brunswickUsers"
  */
 export const featureFlags = new Set(
-  env.FEATURE_FLAGS ? env.FEATURE_FLAGS.split(',').map((f) => f.trim()).filter(Boolean) : []
+  env.FEATURE_FLAGS ? env.FEATURE_FLAGS.split(',').map((f) => f.trim()).filter(Boolean) : [],
 );

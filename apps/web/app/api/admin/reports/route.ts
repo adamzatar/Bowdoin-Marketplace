@@ -6,20 +6,20 @@
 // - Defensive rate limits (per-user + per-IP)
 // - Audited mutations
 //
-// NOTE: This assumes a Prisma model `Report` with (id, type, status, reason,
-// createdAt, listingId?, reportedUserId?, reporterId?) fields. If your field
+// NOTE: This assumes a Prisma model `Report` with (id, status, reason,
+// createdAt, reportedListingId?, reportedUserId?, reporterId?) fields. If your field
 // names differ, tweak the `select`/`where`/`data` blocks accordingly.
 
-import { env } from '@bowdoin/config/env';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
 
-import type { Prisma } from '@bowdoin/db';
+import { withAuth, rateLimit, auditEvent, jsonError } from '@/server';
 
-import { auditEvent } from '../../../../src/server/handlers/audit';
-import { jsonError } from '../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../src/server/rateLimit';
-import { withAuth } from '../../../../src/server/withAuth';
+import type { Prisma } from '@prisma/client';
 
 // ---------- helpers
 
@@ -31,19 +31,34 @@ const JSON_NOSTORE = {
   vary: 'Cookie',
 };
 
-function isAdminish(u: any): boolean {
-  // Flexible checks to work with a few session shapes
+function isAdminish(user: unknown): boolean {
+  if (!user || typeof user !== 'object') return false;
+
+  const candidate = user as {
+    role?: unknown;
+    roles?: unknown;
+    permissions?: unknown;
+  };
+
+  const role = typeof candidate.role === 'string' ? candidate.role : null;
+  const roles = Array.isArray(candidate.roles) ? candidate.roles : [];
+  const permissions = Array.isArray(candidate.permissions) ? candidate.permissions : [];
+
   return (
-    u?.role === 'admin' ||
-    (Array.isArray(u?.roles) && u.roles.includes('admin')) ||
-    (Array.isArray(u?.permissions) &&
-      (u.permissions.includes('admin:read') || u.permissions.includes('admin:write')))
+    role === 'admin' ||
+    roles.some((r) => String(r).toLowerCase() === 'admin') ||
+    permissions.some((p) => {
+      const value = String(p).toLowerCase();
+      return value === 'admin:read' || value === 'admin:write';
+    })
   );
 }
 
+const withStrictAuth = withAuth<{ params?: Record<string, string>; ip: string }>();
+
 // ---------- validation
 
-const StatusZ = z.enum(['OPEN', 'RESOLVED']).default('OPEN');
+const StatusZ = z.enum(['OPEN', 'REVIEWED', 'ACTIONED', 'DISMISSED']).default('OPEN');
 const TypeZ = z.enum(['LISTING', 'USER']).optional();
 
 const ListQueryZ = z.object({
@@ -61,14 +76,15 @@ const BulkResolveBodyZ = z.object({
 // ---------- GET /api/admin/reports
 // List reports with cursor pagination
 
-export const GET = withAuth(async (req, ctx) => {
-  if (!isAdminish(ctx.session.user)) return jsonError(403, 'forbidden');
+export const GET = withStrictAuth(async (req, ctx) => {
+  const user = ctx.session?.user;
+  const userId = typeof user?.id === 'string' ? user.id : null;
+  if (!userId || !isAdminish(user)) return jsonError(403, 'forbidden');
 
-  // rate limit (per-admin + per-ip)
   try {
     await Promise.all([
-      rateLimit(`rl:admin:reports:list:user:${ctx.session.user.id}`, 120, 60), // 120/min/user
-      rateLimit(`rl:admin:reports:list:ip:${ctx.ip}`, 200, 60), // 200/min/ip
+      rateLimit(`rl:admin:reports:list:user:${userId}`, 120, 60),
+      rateLimit(`rl:admin:reports:list:ip:${ctx.ip}`, 200, 60),
     ]);
   } catch {
     return jsonError(429, 'too_many_requests');
@@ -87,7 +103,8 @@ export const GET = withAuth(async (req, ctx) => {
 
   const where: Prisma.ReportWhereInput = {
     status,
-    ...(type ? { type } : {}),
+    ...(type === 'LISTING' ? { reportedListingId: { not: null } } : {}),
+    ...(type === 'USER' ? { reportedUserId: { not: null } } : {}),
   };
 
   const results = await prisma.report.findMany({
@@ -97,11 +114,10 @@ export const GET = withAuth(async (req, ctx) => {
     orderBy: { createdAt: 'desc' },
     select: {
       id: true,
-      type: true,
       status: true,
       reason: true,
       createdAt: true,
-      listingId: true,
+      reportedListingId: true,
       reportedUserId: true,
       reporterId: true,
     },
@@ -115,7 +131,12 @@ export const GET = withAuth(async (req, ctx) => {
     items = results;
   }
 
-  return new Response(JSON.stringify({ ok: true, items, nextCursor }), {
+  const transformed = items.map(({ reportedListingId, ...rest }) => ({
+    ...rest,
+    listingId: reportedListingId,
+  }));
+
+  return new Response(JSON.stringify({ ok: true, items: transformed, nextCursor }), {
     status: 200,
     headers: JSON_NOSTORE,
   });
@@ -124,52 +145,42 @@ export const GET = withAuth(async (req, ctx) => {
 // ---------- POST /api/admin/reports
 // Bulk resolve a set of reports (idempotent)
 
-export const POST = withAuth(async (req, ctx) => {
-  if (!isAdminish(ctx.session.user)) return jsonError(403, 'forbidden');
+export const POST = withStrictAuth(async (req, ctx) => {
+  const user = ctx.session?.user;
+  const userId = typeof user?.id === 'string' ? user.id : null;
+  if (!userId || !isAdminish(user)) return jsonError(403, 'forbidden');
 
-  // rate limit (tighter for mutations)
   try {
     await Promise.all([
-      rateLimit(`rl:admin:reports:resolve:user:${ctx.session.user.id}`, 30, 60), // 30/min/user
-      rateLimit(`rl:admin:reports:resolve:ip:${ctx.ip}`, 60, 60), // 60/min/ip
+      rateLimit(`rl:admin:reports:resolve:user:${userId}`, 30, 60),
+      rateLimit(`rl:admin:reports:resolve:ip:${ctx.ip}`, 60, 60),
     ]);
   } catch {
     return jsonError(429, 'too_many_requests');
   }
 
-  let body: z.infer<typeof BulkResolveBodyZ>;
-  try {
-    body = BulkResolveBodyZ.parse(await req.json());
-  } catch {
+  const parsedBody = BulkResolveBodyZ.safeParse(await req.json());
+  if (!parsedBody.success) {
     return jsonError(400, 'invalid_request_body');
   }
+  const body = parsedBody.data;
 
-  // Update reports (only OPEN -> RESOLVED)
   const updated = await prisma.report.updateMany({
     where: { id: { in: body.ids }, status: 'OPEN' },
     data: {
-      status: 'RESOLVED',
-      resolvedAt: new Date(),
-      resolvedById: ctx.session.user.id,
-      resolutionNote: body.note ?? null,
-    } as any, // if your schema uses different names, adjust here
+      status: 'ACTIONED',
+    },
   });
 
-  // Fire-and-forget audit
-  auditEvent('admin.report.bulk_resolve', {
-    actorId: ctx.session.user.id,
-    count: updated.count,
-    ids: body.ids,
-    note: body.note,
-    ip: ctx.ip,
-  }).catch(() => {});
+  await auditEvent('admin.report.bulk_resolve', {
+    actor: { id: userId },
+    target: { type: 'report.bulk', id: body.ids.join(',') },
+    meta: { count: updated.count, note: body.note, ip: ctx.ip, route: '/api/admin/reports' },
+    outcome: 'success',
+  });
 
   return new Response(JSON.stringify({ ok: true, updated: updated.count }), {
     status: 200,
     headers: JSON_NOSTORE,
   });
 });
-
-// --------- Optional: disable caching aggressively (already via headers above)
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;

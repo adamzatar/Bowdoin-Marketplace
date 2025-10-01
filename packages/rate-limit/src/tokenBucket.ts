@@ -143,24 +143,28 @@ let cachedSha: string | null = null;
 
 async function ensureScript(client: RedisClientType): Promise<string> {
   if (cachedSha) return cachedSha;
-  const sha = await client.sendCommand<string[]>(["SCRIPT", "LOAD", LUA]);
-  // redis v4 returns a string; some codecs may wrap
-  cachedSha = Array.isArray(sha) ? (sha[0] as unknown as string) : (sha as unknown as string);
-  return cachedSha!;
+  const resp = await client.sendCommand<string | string[]>(["SCRIPT", "LOAD", LUA]);
+
+  // redis v4 returns a string; some codecs may wrap into an array — normalize robustly
+  const sha = Array.isArray(resp) ? String(resp[0]) : String(resp);
+  if (!sha) {
+    throw new Error("[rate-limit] failed to load Lua script (empty SHA)");
+  }
+  cachedSha = sha;
+  return sha;
 }
 
 /** Coerce/validate Redis EVALSHA response into a 6-number tuple. */
 function normalizeEvalResult(raw: unknown): [number, number, number, number, number, number] {
-  const arr =
-    ((raw as Array<number | string> | undefined)?.map((v) =>
-      typeof v === "string" ? Number(v) : v
-    ) as Array<number | undefined>) ?? [];
-
-  if (arr.length < 6 || arr.some((v) => typeof v !== "number" || Number.isNaN(v))) {
+  if (!Array.isArray(raw)) {
+    throw new Error(`[rate-limit] bad redis response (not array): ${JSON.stringify(raw)}`);
+  }
+  const nums = raw.map((v) => (typeof v === "string" ? Number(v) : Number(v)));
+  if (nums.length < 6 || nums.slice(0, 6).some((n) => Number.isNaN(n))) {
     throw new Error(`[rate-limit] bad redis response: ${JSON.stringify(raw)}`);
   }
-  // Force tuple typing
-  return [arr[0]!, arr[1]!, arr[2]!, arr[3]!, arr[4]!, arr[5]!] as const;
+  const tuple = nums.slice(0, 6) as [number, number, number, number, number, number];
+  return tuple;
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -180,9 +184,11 @@ export async function consume(cfg: TokenBucketConfig, requestedTokens = 1): Prom
 
   const sha = await ensureScript(client);
 
+  type EvalShaOptions = { keys: string[]; arguments: string[] };
+
   let rawOut: unknown;
   try {
-    rawOut = await client.evalSha(sha, {
+    const opts: EvalShaOptions = {
       keys: [key],
       arguments: [
         String(cfg.capacity),
@@ -192,13 +198,15 @@ export async function consume(cfg: TokenBucketConfig, requestedTokens = 1): Prom
         String(nowMs),
         String(ttl),
       ],
-    } as any); // redis typings are overly narrow for evalSha
+    };
+    rawOut = await client.evalSha(sha, opts);
   } catch (e) {
     // Fallback: if script missing (e.g., after Redis restart), reload and retry once
-    if ((e as Error)?.message?.toLowerCase().includes("noscript")) {
+    const msg = (e as Error)?.message?.toLowerCase() ?? "";
+    if (msg.includes("noscript")) {
       cachedSha = null;
       const sha2 = await ensureScript(client);
-      rawOut = await client.evalSha(sha2, {
+      const opts: EvalShaOptions = {
         keys: [key],
         arguments: [
           String(cfg.capacity),
@@ -208,7 +216,8 @@ export async function consume(cfg: TokenBucketConfig, requestedTokens = 1): Prom
           String(nowMs),
           String(ttl),
         ],
-      } as any);
+      };
+      rawOut = await client.evalSha(sha2, opts);
     } else {
       throw e;
     }

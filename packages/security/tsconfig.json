@@ -3,19 +3,15 @@
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["ES2022", "DOM"],
-
     "module": "ESNext",
-    "moduleResolution": "bundler",
-
+    "moduleResolution": "Bundler",
     "rootDir": "./src",
     "outDir": "./dist",
     "tsBuildInfoFile": "./dist/.tsbuildinfo",
     "composite": true,
-
     "declaration": true,
-    "emitDeclarationOnly": false,
+    "declarationMap": true,
     "sourceMap": true,
-
     "strict": true,
     "exactOptionalPropertyTypes": true,
     "skipLibCheck": true,
@@ -23,17 +19,13 @@
     "verbatimModuleSyntax": true,
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": false,
-
+    "noEmit": false,
     "types": ["node"],
-    "resolveJsonModule": true,
-
-    "noEmit": false
+    "resolveJsonModule": true
   },
   "include": [
     "src/**/*.ts",
-    "src/**/*.mts",
-    "src/**/*.d.ts",
-    "vitest.config.ts"
+    "src/**/*.d.ts"
   ],
   "exclude": [
     "dist",
@@ -43,8 +35,7 @@
     "**/*.spec.ts"
   ],
   "references": [
-    { "path": "../config" },
-    { "path": "../observability" },
+    { "path": "../config/tsconfig.src.json" },
     { "path": "../rate-limit" }
   ]
 }

@@ -1,14 +1,16 @@
 // apps/web/app/api/admin/listings/[id]/remove/route.ts
 
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
 import { prisma } from '@bowdoin/db';
-import { audit } from '@bowdoin/observability/audit';
 import { logger } from '@bowdoin/observability/logger';
 import { getRedisClient } from '@bowdoin/rate-limit/redisClient';
 import { consume as consumeTokenBucket } from '@bowdoin/rate-limit/tokenBucket';
-import { authOptions } from '@bowdoin/auth/nextauth';
-import { headers } from 'next/headers';
-import { getServerSession } from 'next-auth';
 import { z } from 'zod';
+
+// Local app helpers (avoid next-auth & next/headers)
+import { withAuth, auditEvent } from '@/server';
 
 const JSON_NOSTORE: HeadersInit = {
   'content-type': 'application/json; charset=utf-8',
@@ -33,21 +35,24 @@ function jsonError(status: number, code: string, extra?: Record<string, unknown>
   });
 }
 
-type Adminish =
-  | { role?: string | null; roles?: string[] | null; permissions?: string[] | null }
-  | undefined
-  | null;
+/** Runtime-safe guard for admin-like privileges coming from session.user. */
+function isAdminish(u: unknown): boolean {
+  if (!u || typeof u !== 'object') return false;
 
-function isAdminish(u: Adminish): boolean {
-  if (!u) return false;
-  if (u.role === 'admin') return true;
-  if (Array.isArray(u.roles) && u.roles.includes('admin')) return true;
-  if (Array.isArray(u.permissions)) {
-    return u.permissions.includes('admin:read') || u.permissions.includes('admin:write');
+  const role = (u as { role?: unknown }).role;
+  if (role === 'admin') return true;
+
+  const roles = (u as { roles?: unknown }).roles;
+  if (Array.isArray(roles) && roles.includes('admin')) return true;
+
+  const perms = (u as { permissions?: unknown }).permissions;
+  if (Array.isArray(perms)) {
+    return perms.includes('admin:read') || perms.includes('admin:write');
   }
   return false;
 }
 
+/** Local, package-based rate limiter (no app-internal imports). */
 async function rateLimit(key: string, limit: number, windowSec: number): Promise<void> {
   try {
     const client = await getRedisClient();
@@ -64,66 +69,75 @@ async function rateLimit(key: string, limit: number, windowSec: number): Promise
     );
     if (!res.allowed) throw new Error('rate_limited');
   } catch (err) {
+    // Infra failures: soft-allow, but propagate explicit rate_limited
     logger.warn({ key, limit, windowSec, err }, 'rate limit unavailable or exceeded');
     if ((err as Error).message === 'rate_limited') throw err;
   }
 }
 
-export async function POST(
-  req: Request,
-  ctx: { params: { id: string } },
-): Promise<Response> {
-  const session = await getServerSession(authOptions);
+function getIpFrom(req: Request): string {
+  const xfwd = req.headers.get('x-forwarded-for');
+  if (xfwd) {
+    const first = xfwd.split(',')[0]?.trim();
+    if (first) return first;
+  }
+  const real = req.headers.get('x-real-ip');
+  if (real) return real;
+  return '0.0.0.0';
+}
+
+export const POST = withAuth<{ params: { id: string } }>()(async (req, ctx) => {
+  const session = ctx.session;
   const user = session?.user;
-  if (!user?.id) return jsonError(401, 'unauthorized');
+  const userId = typeof (ctx.userId ?? user?.id) === 'string' ? String(ctx.userId ?? user?.id) : null;
+
+  if (!userId) return jsonError(401, 'unauthorized');
   if (!isAdminish(user)) return jsonError(403, 'forbidden');
 
-  const hdrs = headers();
-  const ip =
-    hdrs.get('x-forwarded-for')?.split(',')[0]?.trim() ??
-    hdrs.get('x-real-ip') ??
-    '0.0.0.0';
+  const ip = getIpFrom(req);
+  const ua = req.headers.get('user-agent') ?? undefined;
 
+  // Per-user + per-IP limits
   try {
     await Promise.all([
-      rateLimit(`admin:listing:remove:user:${user.id}`, 30, 60),
+      rateLimit(`admin:listing:remove:user:${userId}`, 30, 60),
       rateLimit(`admin:listing:remove:ip:${ip}`, 60, 60),
     ]);
   } catch {
     return jsonError(429, 'too_many_requests');
   }
 
-  let listingId: string;
-  try {
-    listingId = IdParam.parse(ctx.params).id;
-  } catch {
-    return jsonError(400, 'invalid_listing_id');
-  }
+  const parsedId = IdParam.safeParse(ctx.params);
+  if (!parsedId.success) return jsonError(400, 'invalid_listing_id');
+  const listingId = parsedId.data.id;
 
-  let body: z.infer<typeof BodyZ>;
-  try {
-    body = BodyZ.parse(await req.json().catch(() => ({})));
-  } catch {
-    return jsonError(400, 'invalid_request_body');
-  }
+  const parsedBody = BodyZ.safeParse(await req.json().catch(() => ({})));
+  if (!parsedBody.success) return jsonError(400, 'invalid_request_body');
+  const body = parsedBody.data;
 
   try {
     const deleted = await prisma.listing.delete({
       where: { id: listingId },
-      select: { id: true },
+      select: { id: true, title: true },
     });
 
-    void audit.emit('admin.listing.remove', {
-      outcome: 'success',
-      meta: {
-        actorId: user.id,
-        subjectId: deleted.id,
-        reason: body.reason ?? undefined,
-        ip,
-        ua: hdrs.get('user-agent') ?? undefined,
-        mode: 'hard',
+    // Mirror existing audit logging shape, but use local emitter
+    void auditEvent(
+      'admin.listing.remove',
+      {
+        outcome: 'success',
+        meta: {
+          actorId: userId,
+          subjectId: deleted.id,
+          reason: body.reason ?? undefined,
+          ip,
+          ua,
+          mode: 'hard',
+        },
       },
-    });
+      // optional ctx bag your emitter accepts elsewhere
+      { req, userId },
+    );
 
     return new Response(
       JSON.stringify({ ok: true, listingId: deleted.id, removed: true, permanent: true }, null, 0),
@@ -132,10 +146,26 @@ export async function POST(
   } catch (e) {
     const code = (e as { code?: string }).code;
     if (code === 'P2025') return jsonError(404, 'listing_not_found');
+
     logger.error({ err: e, listingId }, 'admin.listing.remove error');
+
+    // Emit failure audit as in other routes
+    void auditEvent(
+      'admin.listing.remove',
+      {
+        outcome: 'failure',
+        meta: {
+          actorId: userId,
+          subjectId: listingId,
+          reason: body.reason ?? undefined,
+          ip,
+          ua,
+          mode: 'hard',
+        },
+      },
+      { req, userId },
+    );
+
     return jsonError(500, 'internal_error');
   }
-}
-
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
+});

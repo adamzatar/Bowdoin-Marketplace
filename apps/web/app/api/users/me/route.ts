@@ -11,9 +11,7 @@ import { headers } from 'next/headers';
 
 import type { NextRequest } from 'next/server';
 
-import { jsonError } from '../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../src/server/rateLimit';
-import { requireSession } from '../../../../src/server/withAuth';
+import { withAuth, rateLimit, jsonError } from '@/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -29,18 +27,16 @@ function noStoreHeaders() {
   };
 }
 
-export async function GET(_req: NextRequest) {
-  // Require an authenticated session
-  const auth = await requireSession();
-  if (!auth.ok) return auth.error;
-
-  const session = auth.session;
+export const GET = withAuth()(async (_req, ctx) => {
+  const userSession = ctx.session?.user;
+  const userId = ctx.userId ?? userSession?.id;
+  if (!userId || !userSession) return jsonError(401, 'unauthorized');
 
   // Lightweight per-user rate limit (fallback to IP if somehow no user id)
   const hdrs = headers();
   const ip =
     hdrs.get('x-forwarded-for')?.split(',')[0]?.trim() || hdrs.get('x-real-ip') || '0.0.0.0';
-  const key = `users:me:${session.user?.id ?? ip}`;
+  const key = `users:me:${userId ?? ip}`;
 
   try {
     await rateLimit(key, 60, 60); // 60 reqs / 60s
@@ -51,19 +47,19 @@ export async function GET(_req: NextRequest) {
   // Build a stable, public-safe payload.
   // Prefer values from the session; enrich here later if you load from DB.
   const user = {
-    id: session.user.id,
-    email: session.user.email ?? null,
-    name: session.user.name ?? null,
-    image: session.user.image ?? null,
-    roles: session.user.roles ?? [], // e.g., ["user"], ["admin"]
-    affiliation: session.user.affiliation ?? null, // { campus, status, verifiedAt } shape if present
-    audience: session.user.audience ?? 'public', // e.g., "public" | "community"
-    createdAt: session.user.createdAt ?? null,
-    updatedAt: session.user.updatedAt ?? null,
+    id: userId,
+    email: userSession.email ?? null,
+    name: userSession.name ?? null,
+    image: userSession.image ?? null,
+    roles: userSession.roles ?? [], // e.g., ["user"], ["admin"]
+    affiliation: userSession.affiliation ?? null,
+    audience: userSession.audience ?? 'public',
+    createdAt: userSession.createdAt ?? null,
+    updatedAt: userSession.updatedAt ?? null,
   };
 
   return new Response(JSON.stringify({ user }, null, 0), {
     status: 200,
     headers: noStoreHeaders(),
   });
-}
+});

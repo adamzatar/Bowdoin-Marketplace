@@ -7,10 +7,9 @@
  * via @bowdoin/rate-limit, with an in-memory fallback for local/dev.
  */
 
-import crypto from "node:crypto";
+import crypto from "crypto";
 
 import { env } from "@bowdoin/config/env";
-
 import {
   getRedisClient,
   consume as consumeTokenBucket,
@@ -213,6 +212,13 @@ export interface EnforceParams {
   tokens?: number;
 }
 
+/** Merge headers using Headers.forEach (DTS-safe; no iterator required). */
+function mergeHeaders(from: Headers, into: Headers): void {
+  from.forEach((v, k) => {
+    into.set(k, v);
+  });
+}
+
 export class RateLimitDecision {
   constructor(
     public readonly kind: RateKind,
@@ -240,15 +246,13 @@ export class RateLimitDecision {
 
   /** Merge headers into existing headers (for successful responses). */
   applyHeaders(target = new Headers()): Headers {
-    const h = this.headers();
-    for (const [k, v] of h) target.set(k, v);
+    mergeHeaders(this.headers(), target);
     return target;
   }
 
   /** Prebuilt 429 response with appropriate headers/body. */
   to429(message = "Too Many Requests"): Response {
-    const h = this.headers();
-    const headers = new Headers(h);
+    const headers = this.headers();
     headers.set("Content-Type", "application/json; charset=utf-8");
     return new Response(
       JSON.stringify({
@@ -395,7 +399,13 @@ export function withRateLimit<TCtx = unknown>(
 
     const res = await handler(req, ctx);
     const merged = new Headers(res.headers);
-    for (const [k, v] of decision.headers()) merged.set(k, v);
-    return new Response(res.body, { status: res.status, statusText: res.statusText, headers: merged });
+    // DTS-safe: don’t rely on Headers iterator
+    mergeHeaders(decision.headers(), merged);
+
+    return new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: merged,
+    });
   };
 }

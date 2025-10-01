@@ -13,7 +13,7 @@
 
     "module": "ESNext",
     "target": "ES2022",
-    "moduleResolution": "bundler",
+    "moduleResolution": "Bundler",
     
     "baseUrl": ".",
      "paths": {

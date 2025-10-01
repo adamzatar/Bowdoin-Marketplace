@@ -1,29 +1,53 @@
 // packages/auth/src/nextauth.ts
 
 // ───────────────────────── value imports (external) ─────────────────────────
-import { PrismaAdapter } from "@next-auth/prisma-adapter";
+import process from "node:process"; // keep `process` explicit for ESLint in ESM
+
 import { env } from "@bowdoin/config/env";
 import { prisma } from "@bowdoin/db";
 import { audit } from "@bowdoin/observability/audit";
 import { logger } from "@bowdoin/observability/logger";
+import { PrismaAdapter } from "@next-auth/prisma-adapter";
+import NextAuthImport from "next-auth";
+// Credentials provider (value import; we’ll normalize below)
+import CredentialsImport from "next-auth/providers/credentials";
 
 // ─────────────────────────── value imports (internal) ───────────────────────
 import { oktaProvider } from "./okta-provider";
 import { emailProvider } from "./providers/email";
 import { affiliationRBAC } from "./rbac/affiliation";
 
-// ───────────────────────── type-only imports (keep last) ────────────────────
+// ───────────────────────── type-only imports (keep after values) ────────────
 import type { NextAuthOptions, LoggerInstance, Session, User } from "next-auth";
 import type { JWT } from "next-auth/jwt";
+import type { CredentialsConfig } from "next-auth/providers/credentials";
+
+/* ────────────────────────────── type helpers ───────────────────────────── */
+
+type DevCreds = {
+  email: { label: string; type: string; placeholder: string };
+  name: { label: string; type: string; placeholder: string };
+};
+
+type ProviderItem = NextAuthOptions["providers"][number];
+type CredentialsFactory = (config: CredentialsConfig<DevCreds>) => ProviderItem;
+
+/* ─────────────────────────── normalize Credentials ──────────────────────── */
+
+// Pull `.default` when present, otherwise the module value; then cast to factory
+const RawCredentials =
+  (CredentialsImport as unknown as { default?: unknown }).default ??
+  (CredentialsImport as unknown);
+const Credentials = RawCredentials as unknown as CredentialsFactory;
 
 /* ────────────────────────────── helpers ───────────────────────────── */
 
 /** Parse a comma-separated allowlist from env; case-insensitive. */
 function allowedDomains(): string[] {
-  const raw = process.env.ALLOWED_EMAIL_DOMAINS ?? "";
+  const raw = env.ALLOWED_EMAIL_DOMAINS ?? "";
   return raw
     .split(",")
-    .map((d) => d.trim().toLowerCase())
+    .map((d: string) => d.trim().toLowerCase())
     .filter(Boolean);
 }
 
@@ -50,15 +74,58 @@ type AugmentedSession = Session & {
 /* ────────────────────────────── main ───────────────────────────── */
 
 /**
+ * Prefer a runtime flag for enabling the Dev credentials provider.
+ * We avoid typing it in @bowdoin/config/env to keep production env strict.
+ * Set ENABLE_DEV_LOGIN=true in .env.local to enable.
+ */
+const DEV_LOGIN_ENABLED =
+  (process.env.ENABLE_DEV_LOGIN ?? "").toLowerCase() === "true";
+
+/**
  * Build a strongly-typed NextAuth config:
  * - PrismaAdapter on our shared Prisma client
  * - Audit hooks via @bowdoin/observability/audit
- * - Email + Okta providers
- * - Optional email-domain allowlist
+ * - Email + Okta providers (+ optional Dev Credentials)
+ * - Optional email-domain allowlist (bypassed for Dev provider only)
  */
 export function buildNextAuthOptions(): NextAuthOptions {
   /* ------------------------------ Providers ------------------------------ */
-  const providers = [oktaProvider(), emailProvider()];
+  const providers: NextAuthOptions["providers"] = [
+    oktaProvider() as unknown as ProviderItem,
+    emailProvider() as unknown as ProviderItem,
+  ];
+
+  // Dev Credentials provider (opt-in via ENABLE_DEV_LOGIN)
+  if (DEV_LOGIN_ENABLED) {
+    providers.push(
+      Credentials({
+        // TS requires `type` on CredentialsConfig; include it explicitly.
+        type: "credentials",
+        id: "dev",
+        name: "Dev",
+        credentials: {
+          email: { label: "Email", type: "email", placeholder: "you@anydomain.test" },
+          name: { label: "Name", type: "text", placeholder: "Dev User" },
+        },
+        async authorize(creds) {
+          const email = (creds?.email ?? "").trim().toLowerCase();
+          const name = (creds?.name ?? "Dev User").toString().trim();
+
+          // Minimal sanity check (dev-only)
+          if (!email || !email.includes("@")) return null;
+
+          // Ensure a user exists (Credentials flow has no separate Account row).
+          const user = await prisma.user.upsert({
+            where: { email },
+            update: { name },
+            create: { email, name },
+          });
+
+          return { id: user.id, email: user.email, name: user.name ?? null };
+        },
+      }) as ProviderItem
+    );
+  }
 
   /* -------------------------------- Adapter ------------------------------ */
   const adapter = PrismaAdapter(prisma);
@@ -69,7 +136,7 @@ export function buildNextAuthOptions(): NextAuthOptions {
     providers,
 
     session: {
-      // Prefer DB sessions (revocation/admin); switch to `jwt` if desired.
+      // Prefer DB sessions for server-side revocation/admin
       strategy: "database",
       maxAge: 30 * 24 * 60 * 60, // 30 days
       updateAge: 24 * 60 * 60, // re-issue every 24h of activity
@@ -93,24 +160,26 @@ export function buildNextAuthOptions(): NextAuthOptions {
 
     pages: {
       signIn: "/login",
-      error: "/login", // surface auth errors on login page
-      verifyRequest: "/verify", // for email provider "check your email"
+      error: "/login",
+      verifyRequest: "/verify",
     },
 
     callbacks: {
       /**
-       * Gate sign-in. Useful for closed betas / coarse RBAC checks.
+       * Gate sign-in. Dev Credentials (`provider === 'dev'`) bypass allowlist.
        */
       async signIn({ user, account }) {
+        if (account?.provider === "dev") return true;
+
         if (!isDomainAllowed(user?.email ?? null)) {
           logger.warn(
             { userId: user?.id, email: user?.email, reason: "domain_not_allowed" },
-            "sign-in denied",
+            "sign-in denied"
           );
           await audit.emit("auth.sign_in.denied", {
             outcome: "denied",
             severity: "warn",
-            meta: { reason: "domain_not_allowed", email: user?.email },
+            meta: { reason: "domain_not_allowed", email: user?.email ?? undefined },
           });
           return false;
         }
@@ -119,14 +188,13 @@ export function buildNextAuthOptions(): NextAuthOptions {
 
       /**
        * Enrich JWT (mainly used if strategy: 'jwt'). Keep minimal.
-       * Note: non-async (no await) to satisfy lints.
        */
       jwt({ token, user }): AugmentedToken {
         const t = token as AugmentedToken;
         if (user) {
           t.userId = user.id;
           t.email = user.email ?? t.email ?? null;
-          // If you want a roles snapshot on first sign-in, derive here.
+          // Optionally precompute roles on first sign-in:
           // const dec = affiliationRBAC.computeAffiliation({ email: user.email ?? null, oktaGroups: null });
           // t.roles = dec.roles;
         }
@@ -135,7 +203,6 @@ export function buildNextAuthOptions(): NextAuthOptions {
 
       /**
        * Shape the session visible to the client.
-       * Note: non-async (no await) to satisfy lints.
        */
       session({ session, token, user }): AugmentedSession {
         const s = session as AugmentedSession;
@@ -146,13 +213,14 @@ export function buildNextAuthOptions(): NextAuthOptions {
 
         const roles: string[] =
           ((user as unknown as { roles?: string[] })?.roles as string[] | undefined) ??
-          (t.roles ?? affiliationRBAC.computeAffiliation({
-            email: (user?.email ?? t.email ?? null) as string | null,
-            oktaGroups: null,
-          }).roles);
+          (t.roles ??
+            affiliationRBAC.computeAffiliation({
+              email: (user?.email ?? t.email ?? null) as string | null,
+              oktaGroups: null,
+            }).roles);
 
         if (s.user) {
-          s.user.id = userId;
+          if (userId) s.user.id = userId;
           s.user.email = s.user.email ?? user?.email ?? t.email ?? null;
           (s.user as { roles?: string[] }).roles = roles;
         }
@@ -237,3 +305,12 @@ export function buildNextAuthOptions(): NextAuthOptions {
 
 /** Ready-to-use export for consumers. */
 export const authOptions: NextAuthOptions = buildNextAuthOptions();
+
+const NextAuthFn =
+  (NextAuthImport as unknown as { default?: typeof NextAuthImport }).default ??
+  ((NextAuthImport as unknown) as typeof NextAuthImport);
+
+const handler = NextAuthFn(authOptions);
+
+export const authHandler = handler;
+export { handler as GET, handler as POST };

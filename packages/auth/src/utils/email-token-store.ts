@@ -7,8 +7,11 @@
  */
 
 import { randomBytes, createHash } from "node:crypto";
-import type { RedisClientType } from "redis";
+import { setTimeout as nodeSetTimeout, clearTimeout as nodeClearTimeout } from "node:timers";
+
 import { getRedisClient } from "@bowdoin/rate-limit/redisClient";
+
+import type { RedisClientType } from "redis";
 
 /* ───────────────────────────── Types ───────────────────────────── */
 
@@ -60,6 +63,7 @@ const keyOf = (userId: string, email: string) =>
 export class EmailTokenStore {
   private client: RedisClientType | null;
   private mem = new Map<string, EmailTokenRecord>();
+  private memTimers = new Map<string, ReturnType<typeof nodeSetTimeout>>();
 
   constructor(client?: RedisClientType | null) {
     this.client = client ?? null;
@@ -115,12 +119,22 @@ export class EmailTokenStore {
       // Store JSON and set TTL (NX avoids overwriting an existing non-expired record)
       await client.set(key, JSON.stringify(rec), { EX: ttl, NX: true });
     } else {
+      const existingTimer = this.memTimers.get(key);
+      if (existingTimer) {
+        nodeClearTimeout(existingTimer);
+        this.memTimers.delete(key);
+      }
       this.mem.set(key, rec);
       // naive GC (dev-only): remove after TTL
-      const t = setTimeout(() => this.mem.delete(key), ttl * 1000);
-      // Node-only: avoid keeping the event loop alive
-      // @ts-ignore - .unref may not exist in some environments
-      t.unref?.();
+      const t = nodeSetTimeout(() => {
+        this.mem.delete(key);
+        this.memTimers.delete(key);
+      }, ttl * 1000);
+      // Node-only: avoid keeping the event loop alive when supported
+      if (typeof (t as { unref?: () => void }).unref === 'function') {
+        t.unref();
+      }
+      this.memTimers.set(key, t);
     }
 
     return { token, expiresAt };
@@ -151,7 +165,14 @@ export class EmailTokenStore {
     // Expired → clean up and reject
     if (rec.expiresAt < nowSec()) {
       if (client) await client.del(key);
-      else this.mem.delete(key);
+      else {
+        this.mem.delete(key);
+        const timer = this.memTimers.get(key);
+        if (timer) {
+          nodeClearTimeout(timer);
+          this.memTimers.delete(key);
+        }
+      }
       return false;
     }
 
@@ -160,6 +181,11 @@ export class EmailTokenStore {
       await client.del(key);
     } else {
       this.mem.delete(key);
+      const timer = this.memTimers.get(key);
+      if (timer) {
+        nodeClearTimeout(timer);
+        this.memTimers.delete(key);
+      }
     }
 
     return true;
@@ -170,7 +196,14 @@ export class EmailTokenStore {
     const key = keyOf(userId, email);
     const client = await this.ensure();
     if (client) await client.del(key);
-    else this.mem.delete(key);
+    else {
+      this.mem.delete(key);
+      const timer = this.memTimers.get(key);
+      if (timer) {
+        nodeClearTimeout(timer);
+        this.memTimers.delete(key);
+      }
+    }
   }
 
   async peek(userId: string, email: string): Promise<EmailTokenRecord | null> {
@@ -183,5 +216,3 @@ export class EmailTokenStore {
     return this.mem.get(key) ?? null;
   }
 }
-
-export default EmailTokenStore;

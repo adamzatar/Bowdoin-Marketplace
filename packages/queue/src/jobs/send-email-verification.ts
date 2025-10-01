@@ -116,8 +116,8 @@ export function buildSendEmailVerificationPayload(input: {
   const verificationUrl = buildVerificationLink({
     appBaseUrl: input.appBaseUrl,
     token: input.token,
-    realm: input.realm,
-    redirectTo: input.redirectTo,
+    ...(input.realm ? { realm: input.realm } : {}),
+    ...(input.redirectTo ? { redirectTo: input.redirectTo } : {}),
   });
 
   return SendEmailVerificationPayloadSchema.parse({

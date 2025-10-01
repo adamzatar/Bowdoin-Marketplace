@@ -16,10 +16,7 @@ import { z } from 'zod';
 
 import type { NextRequest } from 'next/server';
 
-import { emitAuditEvent } from '../../../../src/server/handlers/audit';
-import { jsonError } from '../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../src/server/rateLimit';
-import { requireSession } from '../../../../src/server/withAuth';
+import { withAuth, rateLimit, auditEvent, jsonError } from '@/server';
 
 // If you already export a shared schema from contracts, you can switch to:
 //   import { AffiliationUpdateInput } from "@bowdoin/contracts/schemas/affiliation";
@@ -53,17 +50,17 @@ function noStoreHeaders() {
   };
 }
 
-export async function POST(req: NextRequest) {
-  // Require an authenticated session
-  const auth = await requireSession();
-  if (!auth.ok) return auth.error;
-  const session = auth.session;
+export const POST = withAuth()(async (req, ctx) => {
+  const session = ctx.session;
+  const user = session?.user;
+  const userId = ctx.userId ?? user?.id;
+  if (!userId) return jsonError(401, 'unauthorized');
 
   // Rate limit (per-user with IP fallback)
   const hdrs = headers();
   const ip =
     hdrs.get('x-forwarded-for')?.split(',')[0]?.trim() || hdrs.get('x-real-ip') || '0.0.0.0';
-  const rlKey = `users:affiliation:update:${session.user?.id ?? ip}`;
+  const rlKey = `users:affiliation:update:${userId ?? ip}`;
 
   try {
     await rateLimit(rlKey, 20, 60); // 20 writes/minute
@@ -72,28 +69,27 @@ export async function POST(req: NextRequest) {
   }
 
   // Validate body
-  let body: z.infer<typeof BodySchema>;
-  try {
-    const json = await req.json();
-    body = BodySchema.parse(json);
-  } catch (err) {
-    const message =
-      err instanceof z.ZodError ? err.errors.map((e) => e.message).join('; ') : 'invalid JSON';
+  const data = await req.json();
+  const parsedBody = BodySchema.safeParse(data);
+  if (!parsedBody.success) {
+    const issues = parsedBody.error.errors as Array<{ message: string }>;
+    const message = issues.map((issue) => issue.message).join('; ');
     return jsonError(400, message);
   }
+  const body = parsedBody.data;
 
   // TODO: persist to DB — example:
   // const db = getDb(); await db.user.update({ where: { id: session.user.id }, data: { ... } });
   // For now, we echo back the normalized payload.
 
   // Emit an audit event (non-blocking)
-  emitAuditEvent('user.affiliation.updated', {
-    userId: session.user.id,
+  auditEvent('user.affiliation.updated', {
+    userId,
     campus: body.campus,
     role: body.role,
     audience: body.audience,
     program: body.program ?? null,
-    actor: { type: 'user', id: session.user.id },
+    actor: { type: 'user', id: userId },
     ip,
     ua: hdrs.get('user-agent') ?? undefined,
   }).catch(() => {
@@ -110,8 +106,8 @@ export async function POST(req: NextRequest) {
           audience: body.audience,
           program: body.program ?? null,
           // status is managed by verification flow; expose as-is from session for clients
-          status: session.user?.affiliation?.status ?? 'unverified',
-          verifiedAt: session.user?.affiliation?.verifiedAt ?? null,
+          status: user?.affiliation?.status ?? 'unverified',
+          verifiedAt: user?.affiliation?.verifiedAt ?? null,
         },
       },
       null,
@@ -119,14 +115,14 @@ export async function POST(req: NextRequest) {
     ),
     { status: 200, headers: noStoreHeaders() },
   );
-}
+});
 
 // Optional: support GET to return the current session's affiliation snapshot.
 // Handy for clients to hydrate forms without hitting another endpoint.
-export async function GET(_req: NextRequest) {
-  const auth = await requireSession();
-  if (!auth.ok) return auth.error;
-  const { user } = auth.session;
+export const GET = withAuth()(async (_req, ctx) => {
+  const user = ctx.session?.user;
+  const userId = ctx.userId ?? user?.id;
+  if (!userId) return jsonError(401, 'unauthorized');
 
   const affiliation = {
     campus: user?.affiliation?.campus ?? null,
@@ -141,4 +137,4 @@ export async function GET(_req: NextRequest) {
     status: 200,
     headers: noStoreHeaders(),
   });
-}
+});

@@ -1,0 +1,243 @@
+name: Infra Deploy (CDK via OIDC)
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "infra/**"
+      - ".github/workflows/infra-deploy.yml"
+      - "pnpm-lock.yaml"
+      - "package.json"
+      - "pnpm-workspace.yaml"
+  workflow_dispatch:
+    inputs:
+      enableCloudFront:
+        description: "Enable CloudFront (true/false)"
+        required: false
+        default: "false"
+      doBootstrap:
+        description: "Run 'cdk bootstrap' before deploy (only needed once per account/region)"
+        required: false
+        default: "false"
+
+concurrency:
+  group: infra-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  NODE_VERSION: "20.11.1"
+  PNPM_VERSION: "10.17.1"
+  AWS_REGION: "us-east-1"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      AWS_OIDC_ROLE_ARN: ${{ vars.AWS_OIDC_ROLE_ARN }}
+      ROOT_DOMAIN: ${{ vars.ROOT_DOMAIN }}
+      APP_SUBDOMAIN: ${{ vars.APP_SUBDOMAIN }}
+      ENABLE_CLOUDFRONT: ${{ github.event.inputs.enableCloudFront || 'false' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+
+      - name: Versions
+        run: |
+          node -v
+          pnpm -v
+          corepack --version || true
+
+      - name: PNPM store path
+        id: pnpm-store
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache PNPM store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: PNPM network tuning
+        run: |
+          pnpm config set fetch-retries 5
+          pnpm config set fetch-retry-factor 3
+          pnpm config set fetch-retry-maxtimeout 60000
+          pnpm config set fetch-retry-mintimeout 5000
+
+      - name: Install deps (retry; allow lock refresh)
+        run: |
+          set -euo pipefail
+          n=0
+          until [ $n -ge 3 ]; do
+            if pnpm install --no-frozen-lockfile; then
+              exit 0
+            fi
+            n=$((n+1))
+            echo "pnpm install failed (attempt $n). Retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::pnpm install failed after 3 attempts"
+          exit 1
+
+      - name: Workspace topology
+        run: |
+          pnpm -r list --depth -1 || true
+          echo
+          echo "repo vars:"
+          echo "  AWS_OIDC_ROLE_ARN=${AWS_OIDC_ROLE_ARN:-<unset>}"
+          echo "  ROOT_DOMAIN=${ROOT_DOMAIN:-<unset>}"
+          echo "  APP_SUBDOMAIN=${APP_SUBDOMAIN:+\"$APP_SUBDOMAIN\"}"
+
+      # Pass 1: dependency-aware recursive build only for packages/**
+      - name: Build (recursive; packages only)
+        run: |
+          set -euo pipefail
+          pnpm -r --filter "{./packages/**}" --workspace-concurrency=1 --reporter=append-only run build
+
+      # Pass 2 (only runs if pass 1 failed): isolate failing package(s)
+      - name: Isolate failing package build
+        if: failure()    # only if previous step failed
+        run: |
+          set +e
+          echo "::group::Isolating failing package"
+          mapfile -t PKGS < <(jq -r '.packages[].name' <(pnpm m ls -r --json) | grep '^@bowdoin/')
+          failures=()
+          for pkg in "${PKGS[@]}"; do
+            echo ""
+            echo "=== BUILD >> ${pkg}"
+            pnpm -r --filter "${pkg}" --workspace-concurrency=1 --reporter=ndjson run build \
+              >"build-${pkg//@/_}.log" 2>&1
+            if [ $? -ne 0 ]; then
+              echo "!! FAILED: ${pkg}"
+              failures+=("${pkg}")
+            fi
+          done
+          echo "::endgroup::"
+          if ((${#failures[@]})); then
+            echo "Failed packages:"
+            printf ' - %s\n' "${failures[@]}"
+            exit 1
+          fi
+
+      - name: Upload pnpm/build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pnpm-build-logs
+          path: |
+            **/pnpm-debug.log
+            pnpm-debug.log
+            build-*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Preflight — required values present
+        run: |
+          missing=0
+          for v in AWS_OIDC_ROLE_ARN ROOT_DOMAIN; do
+            if [[ -z "${!v}" ]]; then
+              echo "::error::Missing required var: $v"
+              missing=1
+            fi
+          done
+          if [[ -z "${APP_SUBDOMAIN+x}" ]]; then
+            echo "::warning::APP_SUBDOMAIN is not set; treating as empty (apex domain)."
+          else
+            echo "APP_SUBDOMAIN='${APP_SUBDOMAIN}'"
+          fi
+          if [[ "$missing" -ne 0 ]]; then
+            echo "Define repo variables in Settings → Variables → Actions:"
+            echo "  • AWS_OIDC_ROLE_ARN (e.g., arn:aws:iam::<ACCOUNT_ID>:role/BowdoinCdkDeployRole)"
+            echo "  • ROOT_DOMAIN (e.g., bowdoinmarketplace.com)"
+            echo "APP_SUBDOMAIN is optional; leave blank for apex."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: bowdoin-cdk-deploy
+
+      - name: WhoAmI
+        run: aws sts get-caller-identity
+
+      - name: CDK bootstrap (optional)
+        if: github.event.inputs.doBootstrap == 'true'
+        working-directory: infra
+        run: pnpm run bootstrap
+
+      - name: CDK synth
+        working-directory: infra
+        run: |
+          pnpm run synth -- \
+            -c enableCloudFront="$ENABLE_CLOUDFRONT" \
+            -c rootDomain="$ROOT_DOMAIN" \
+            -c appSubdomain="$APP_SUBDOMAIN" \
+            -c region="$AWS_REGION"
+
+      - name: Upload synthesized templates
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdk.out
+          path: infra/cdk.out
+          retention-days: 7
+
+      - name: CDK diff
+        working-directory: infra
+        run: |
+          pnpm run diff -- \
+            -c enableCloudFront="$ENABLE_CLOUDFRONT" \
+            -c rootDomain="$ROOT_DOMAIN" \
+            -c appSubdomain="$APP_SUBDOMAIN" \
+            -c region="$AWS_REGION" || true
+
+      - name: CDK deploy
+        working-directory: infra
+        run: |
+          pnpm run deploy -- \
+            -c enableCloudFront="$ENABLE_CLOUDFRONT" \
+            -c rootDomain="$ROOT_DOMAIN" \
+            -c appSubdomain="$APP_SUBDOMAIN" \
+            -c region="$AWS_REGION" \
+            --require-approval=never
+
+      - name: Upload CDK logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdk-logs
+          path: |
+            infra/cdk.out/**
+            infra/.cdk.staging/**
+          if-no-files-found: ignore
+          retention-days: 7

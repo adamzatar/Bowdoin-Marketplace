@@ -1,27 +1,16 @@
 // apps/web/app/api/listings/[id]/route.ts
-//
-// Resource endpoint for a single listing.
-// - GET:    fetch one listing by ID (audience-aware)
-// - PATCH:  update listing (seller-only)
-// - DELETE: delete listing (seller-only)
-//
-// Features: zod validation, ownership & audience checks, rate limits, auditing,
-// and response-shape normalization consistent with contracts.
-
-import { ListingPublicZ, ListingUpdateInputZ } from '@bowdoin/contracts/schemas/listings';
-import { prisma } from '@bowdoin/db';
-import { z } from 'zod';
-
-import type { NextRequest } from 'next/server';
-
-import { emitAuditEvent } from '../../../../src/server/handlers/audit';
-import { jsonError } from '../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../src/server/rateLimit';
-import { requireSession } from '../../../../src/server/withAuth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
+
+import { prisma } from '@bowdoin/db';
+import { z } from 'zod';
+
+import { withAuth, rateLimit, auditEvent, jsonError } from '@/server';
+
+// type-only import placed after local imports to satisfy import/order
+import type { NextRequest } from 'next/server';
 
 const noStoreHeaders = {
   'content-type': 'application/json; charset=utf-8',
@@ -33,119 +22,159 @@ const noStoreHeaders = {
 
 // ---------- Utilities
 
-const IdParamZ = z.object({ id: z.string().uuid() });
+// Local schema to avoid unresolved subpath import issues
+const ListingIdSchema = z.string().uuid();
+const ListingParamsSchema = z.object({ id: ListingIdSchema });
 
-function toPublic(listing: {
+function unauthorizedJson(): Response {
+  return new Response(JSON.stringify({ error: 'unauthorized' }), {
+    status: 401,
+    headers: noStoreHeaders,
+  });
+}
+
+type AudienceValue = 'CAMPUS' | 'PUBLIC';
+
+const PRISMA_AUDIENCE: Record<'campus' | 'public', AudienceValue> = {
+  campus: 'CAMPUS',
+  public: 'PUBLIC',
+};
+
+type ListingRow = {
   id: string;
   title: string;
   description: string | null;
-  priceCents: number;
-  currency: string;
-  audience: 'public' | 'community';
+  price: unknown; // Prisma.Decimal | number | string (serialize-safe)
+  isFree: boolean;
+  condition: string | null;
   category: string | null;
-  images: string[];
-  tags: string[];
-  sellerId: string;
+  location: string | null;
+  audience: AudienceValue;
+  userId: string;
   createdAt: Date;
   updatedAt: Date;
-  soldAt: Date | null;
-}) {
-  const obj = {
+  status: string; // ListingStatus
+};
+
+function numFromDecimalLike(v: unknown): number {
+  if (v && typeof (v as { toNumber?: () => number }).toNumber === 'function') {
+    return (v as { toNumber: () => number }).toNumber();
+  }
+  if (typeof v === 'string') return Number(v);
+  if (typeof v === 'number') return v;
+  return Number(v ?? 0);
+}
+
+function toPublic(listing: ListingRow) {
+  const price = numFromDecimalLike(listing.price);
+  const priceCents = Math.round(price * 100);
+  const currency = 'USD' as const;
+  const sellerId = listing.userId;
+  const audienceOut = listing.audience === PRISMA_AUDIENCE.public ? 'public' : 'campus';
+
+  return {
     id: listing.id,
     title: listing.title,
     description: listing.description ?? '',
-    price: listing.priceCents / 100,
-    currency: listing.currency,
-    audience: listing.audience,
+    price,
+    priceCents,
+    currency,
+    isFree: listing.isFree,
+    condition: listing.condition,
     category: listing.category,
-    images: listing.images,
-    tags: listing.tags,
-    sellerId: listing.sellerId,
+    location: listing.location,
+    audience: audienceOut,
+    images: [] as string[],
+    tags: [] as string[],
+    sellerId,
     createdAt: listing.createdAt,
     updatedAt: listing.updatedAt,
-    soldAt: listing.soldAt,
+    soldAt: null as Date | null,
+    status: listing.status,
   };
-  if (process.env.NODE_ENV !== 'production') {
-    try {
-      ListingPublicZ.parse(obj);
-    } catch {
-      // ignore in production; contracts drift should be caught in tests
-    }
-  }
-  return obj;
 }
 
-async function getListingOr404(id: string) {
+async function getListingOr404(id: string): Promise<ListingRow | null> {
   const row = await prisma.listing.findUnique({
     where: { id },
     select: {
       id: true,
       title: true,
       description: true,
-      priceCents: true,
-      currency: true,
-      audience: true,
+      price: true,
+      isFree: true,
+      condition: true,
       category: true,
-      images: true,
-      tags: true,
-      sellerId: true,
+      location: true,
+      audience: true,
+      userId: true,
       createdAt: true,
       updatedAt: true,
-      soldAt: true,
+      status: true,
     },
   });
-  if (!row) return null;
-  return row;
+  return row ?? null;
 }
 
 // ---------- GET /api/listings/[id]
 
-export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
-  const parsed = IdParamZ.safeParse(ctx.params);
+export const GET = withAuth<{ params: { id: string } }>({ optional: true })(async (_req, ctx) => {
+  const parsed = ListingParamsSchema.safeParse(ctx.params);
   if (!parsed.success) return jsonError(400, 'invalid_id');
 
-  // Soft anonymous read-rate-limit per listing (60/min)
+  const id: string = parsed.data.id;
+
   try {
-    await rateLimit(`rl:listings:get:${parsed.data.id}`, 60, 60);
+    await rateLimit(`rl:listings:get:${id}`, 60, 60);
   } catch {
     return jsonError(429, 'Too many requests');
   }
 
-  const row = await getListingOr404(parsed.data.id);
+  const row = await getListingOr404(id);
   if (!row) return jsonError(404, 'listing_not_found');
 
-  // Enforce audience: community listings require a session
-  if (row.audience === 'community') {
-    const auth = await requireSession();
-    if (!auth.ok) return jsonError(403, 'forbidden');
+  // In your current model, CAMPUS = Bowdoin-only; PUBLIC = everyone.
+  if (row.audience === PRISMA_AUDIENCE.campus && !ctx.userId) {
+    return jsonError(401, 'unauthorized');
   }
 
   return new Response(JSON.stringify({ data: toPublic(row) }), {
     status: 200,
     headers: noStoreHeaders,
   });
-}
+});
 
 // ---------- PATCH /api/listings/[id]
 
-export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
-  const auth = await requireSession();
-  if (!auth.ok) return auth.error;
-  const { session } = auth;
+export const PATCH = withAuth<{ params: { id: string } }>()(async (req, ctx) => {
+  const userId = ctx.userId ?? ctx.session?.user?.id;
+  if (!userId) return unauthorizedJson();
 
-  const parsedId = IdParamZ.safeParse(ctx.params);
+  const parsedId = ListingParamsSchema.safeParse(ctx.params);
   if (!parsedId.success) return jsonError(400, 'invalid_id');
-  const id = parsedId.data.id;
+  const id: string = parsedId.data.id;
 
   try {
-    await rateLimit(`rl:listings:update:${session.user.id}`, 30, 60); // 30/min per user
+    await rateLimit(`rl:listings:update:${userId}`, 30, 60);
   } catch {
     return jsonError(429, 'Too many requests');
   }
 
-  // Validate body with contract schema
-  const body = (await req.json().catch(() => null)) as unknown;
-  const parsedBody = ListingUpdateInputZ.safeParse(body);
+  // Accept a minimal JSON payload; your old schema referenced contracts.
+  const BodyZ = z.object({
+    title: z.string().min(1).max(200).optional(),
+    description: z.string().max(10_000).nullable().optional(),
+    price: z.number().min(0).max(1_000_000).optional(),
+    audience: z.enum(['public', 'campus']).optional(),
+    category: z.string().max(120).nullable().optional(),
+    location: z.string().max(120).nullable().optional(),
+    isFree: z.boolean().optional(),
+    condition: z.string().nullable().optional(),
+    // ignore images/tags/soldAt here (not present in schema)
+  });
+
+  const raw = (await req.json().catch(() => null)) as unknown;
+  const parsedBody = BodyZ.safeParse(raw);
   if (!parsedBody.success) {
     return new Response(
       JSON.stringify({ error: 'invalid_body', details: parsedBody.error.flatten() }),
@@ -154,31 +183,24 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
   }
   const input = parsedBody.data;
 
-  // Load existing & enforce ownership
   const existing = await prisma.listing.findUnique({
     where: { id },
-    select: { sellerId: true, soldAt: true },
+    select: { userId: true, status: true },
   });
   if (!existing) return jsonError(404, 'listing_not_found');
-  if (existing.sellerId !== session.user.id) return jsonError(403, 'forbidden');
+  if (existing.userId !== userId) return jsonError(403, 'forbidden');
 
-  // Business rules:
-  // - Prevent updating soldAt here (use /mark-sold)
-  // - Normalize price to cents when provided
-  // - Limit images/tags lengths for safety (server-side guard)
-  const data: Record<string, any> = {};
+  const data: Record<string, unknown> = {};
   if (input.title !== undefined) data.title = input.title;
   if (input.description !== undefined) data.description = input.description ?? '';
-  if (input.price !== undefined) data.priceCents = Math.round(input.price * 100);
-  if (input.currency !== undefined) data.currency = input.currency;
-  if (input.audience !== undefined) data.audience = input.audience;
+  if (input.price !== undefined) data.price = input.price; // Decimal handled by Prisma
   if (input.category !== undefined) data.category = input.category ?? null;
-  if (input.images !== undefined) data.images = (input.images ?? []).slice(0, 20); // cap to 20 images
-  if (input.tags !== undefined) data.tags = (input.tags ?? []).slice(0, 25); // cap to 25 tags
-
-  // No soldAt mutation via this route
-  if ('soldAt' in (input as any)) {
-    return jsonError(400, 'soldAt_not_mutable_here');
+  if (input.location !== undefined) data.location = input.location ?? null;
+  if (input.isFree !== undefined) data.isFree = input.isFree;
+  if (input.condition !== undefined) data.condition = input.condition ?? null;
+  if (input.audience !== undefined) {
+    data.audience =
+      input.audience === 'public' ? PRISMA_AUDIENCE.public : PRISMA_AUDIENCE.campus;
   }
 
   try {
@@ -189,82 +211,97 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
         id: true,
         title: true,
         description: true,
-        priceCents: true,
-        currency: true,
-        audience: true,
+        price: true,
+        isFree: true,
+        condition: true,
         category: true,
-        images: true,
-        tags: true,
-        sellerId: true,
+        location: true,
+        audience: true,
+        userId: true,
         createdAt: true,
         updatedAt: true,
-        soldAt: true,
+        status: true,
       },
     });
 
-    emitAuditEvent('listing.updated', {
-      actor: { type: 'user', id: session.user.id },
-      listingId: id,
-      changed: Object.keys(data),
-    }).catch(() => {});
+    await auditEvent(
+      'listing.updated',
+      {
+        actor: { type: 'user', id: userId },
+        listingId: id,
+        changed: Object.keys(data),
+      },
+      { req, userId },
+    );
 
     return new Response(JSON.stringify({ ok: true, data: toPublic(updated) }), {
       status: 200,
       headers: noStoreHeaders,
     });
   } catch (err) {
-    emitAuditEvent('listing.update_failed', {
-      actor: { type: 'user', id: session.user.id },
-      listingId: id,
-      error: err instanceof Error ? err.message : String(err),
-    }).catch(() => {});
+    await auditEvent(
+      'listing.update_failed',
+      {
+        actor: { type: 'user', id: userId },
+        listingId: id,
+        error: err instanceof Error ? err.message : String(err),
+      },
+      { req, userId },
+    );
     return jsonError(500, 'failed_to_update_listing');
   }
-}
+});
 
 // ---------- DELETE /api/listings/[id]
 
-export async function DELETE(_req: NextRequest, ctx: { params: { id: string } }) {
-  const auth = await requireSession();
-  if (!auth.ok) return auth.error;
-  const { session } = auth;
+export const DELETE = withAuth<{ params: { id: string } }>()(async (_req, ctx) => {
+  const userId = ctx.userId ?? ctx.session?.user?.id;
+  if (!userId) return unauthorizedJson();
 
-  const parsedId = IdParamZ.safeParse(ctx.params);
+  const parsedId = ListingParamsSchema.safeParse(ctx.params);
   if (!parsedId.success) return jsonError(400, 'invalid_id');
-  const id = parsedId.data.id;
+  const id: string = parsedId.data.id;
 
   try {
-    await rateLimit(`rl:listings:delete:${session.user.id}`, 5, 3600); // 5/hour per user
+    await rateLimit(`rl:listings:delete:${userId}`, 5, 3600);
   } catch {
     return jsonError(429, 'Too many requests');
   }
 
   const existing = await prisma.listing.findUnique({
     where: { id },
-    select: { id: true, sellerId: true, title: true },
+    select: { id: true, userId: true, title: true },
   });
   if (!existing) return jsonError(404, 'listing_not_found');
-  if (existing.sellerId !== session.user.id) return jsonError(403, 'forbidden');
+  if (existing.userId !== userId) return jsonError(403, 'forbidden');
 
   try {
     await prisma.listing.delete({ where: { id } });
 
-    emitAuditEvent('listing.deleted', {
-      actor: { type: 'user', id: session.user.id },
-      listingId: id,
-      title: existing.title,
-    }).catch(() => {});
+    await auditEvent(
+      'listing.deleted',
+      {
+        actor: { type: 'user', id: userId },
+        listingId: id,
+        title: existing.title,
+      },
+      { req: _req, userId },
+    );
 
     return new Response(JSON.stringify({ ok: true }), {
       status: 200,
       headers: noStoreHeaders,
     });
   } catch (err) {
-    emitAuditEvent('listing.delete_failed', {
-      actor: { type: 'user', id: session.user.id },
-      listingId: id,
-      error: err instanceof Error ? err.message : String(err),
-    }).catch(() => {});
+    await auditEvent(
+      'listing.delete_failed',
+      {
+        actor: { type: 'user', id: userId },
+        listingId: id,
+        error: err instanceof Error ? err.message : String(err),
+      },
+      { req: _req, userId },
+    );
     return jsonError(500, 'failed_to_delete_listing');
   }
-}
+});

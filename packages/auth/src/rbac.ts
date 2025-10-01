@@ -1,5 +1,7 @@
 // packages/auth/src/rbac.ts
-import { env } from "@bowdoin/config/env";
+import process from "node:process";
+
+import { env as _env } from "@bowdoin/config/env";
 import { logger } from "@bowdoin/observability/logger";
 
 /**
@@ -69,7 +71,7 @@ export const can: Policy = (action, resource, ctx) => {
   const isAdmin = atLeast(ctx.subjectRoles, "admin");
   const isStaff = atLeast(ctx.subjectRoles, "staff");
   const isStudent = atLeast(ctx.subjectRoles, "student");
-  const isCommunity = !isStudent && !isStaff && !isAdmin;
+  const _isCommunity = !isStudent && !isStaff && !isAdmin;
 
   if (isAdmin) return "allow";
 

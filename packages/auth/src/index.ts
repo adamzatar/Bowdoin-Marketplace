@@ -1,2 +1,8 @@
 // packages/auth/src/index.ts
-export * from './utils/email-token-store'; // adjust as needed
+
+export { buildNextAuthOptions, authOptions, authHandler, GET, POST } from './nextauth';
+export { oktaProvider, okta } from './okta-provider';
+export * from './providers/email';
+export * from './rbac';
+export * from './rbac/affiliation';
+export { EmailTokenStore } from './utils/email-token-store';

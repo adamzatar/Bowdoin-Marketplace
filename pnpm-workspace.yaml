@@ -1,13 +1,8 @@
 # pnpm-workspace.yaml
 packages:
-  # Application(s)
   - "apps/*"
-
-  # Shared backend/frontend packages
   - "packages/*"
-
-  # Infra & tooling not bundled for web but still part of monorepo
-  - "scripts"
+  - "infra"
 
 # Enable strict linking rules — no phantom deps
 packageManager: "pnpm@9.0.0"

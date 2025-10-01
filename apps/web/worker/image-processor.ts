@@ -8,7 +8,7 @@
 // - Defensive error handling + structured logs
 //
 // Assumptions (from your monorepo):
-// - @bowdoin/queue/src/workers/imageWorker exports `createImageWorker(opts?)`
+// - @bowdoin/queue/workers exports `startImageWorker(opts?)`
 //   which returns an object with at least: `{ name: string, close(): Promise<void> }`
 // - @bowdoin/observability provides init/shutdown helpers + a pino-like logger
 // - @bowdoin/config exports validated env (zod) including optional worker overrides
@@ -22,7 +22,8 @@ import { env } from '@bowdoin/config/env';
 import { logger } from '@bowdoin/observability/logger';
 import { metrics } from '@bowdoin/observability/metrics';
 import { initTracing, shutdownTracing } from '@bowdoin/observability/tracing';
-import { createImageWorker } from '@bowdoin/queue/src/workers/imageWorker';
+import { startImageWorker } from '@bowdoin/queue/workers';
+import type { Counter } from '@opentelemetry/api';
 
 // ---------- Config ----------
 const SERVICE_NAME = 'image-processor';
@@ -34,9 +35,15 @@ const CONCURRENCY = Number(process.env.IMAGE_WORKER_CONCURRENCY ?? env?.WORKER_C
 // how long to wait for graceful shutdown before forcing exit
 const SHUTDOWN_DEADLINE_MS = Number(process.env.IMAGE_WORKER_SHUTDOWN_DEADLINE_MS ?? 25_000);
 
+type WorkerLike = {
+  name?: string;
+  close: () => Promise<void>;
+  on: (event: string, listener: (...args: any[]) => void) => unknown;
+};
+
 // ---------- State ----------
 let shuttingDown = false;
-let worker: { name?: string; close: () => Promise<void> } | undefined;
+let worker: WorkerLike | undefined;
 
 let healthServer: http.Server | undefined;
 
@@ -114,6 +121,17 @@ async function shutdown(signal: NodeJS.Signals | 'uncaughtException' | 'unhandle
   process.exit(0);
 }
 
+let heartbeatCounter: Counter | undefined;
+let jobsStartedCounter: Counter | undefined;
+let jobsCompletedCounter: Counter | undefined;
+let jobsFailedCounter: Counter | undefined;
+
+type WorkerJob = {
+  id?: string;
+  name?: string;
+  data?: unknown;
+};
+
 // ---------- Bootstrap ----------
 async function main() {
   // Attach top-level diagnostics early
@@ -130,23 +148,34 @@ async function main() {
 
   // Observability
   try {
-    await initTracing({ serviceName: SERVICE_NAME });
+    initTracing();
     logger.info({ service: SERVICE_NAME }, 'tracing initialized');
   } catch (err) {
     logger.warn({ err, service: SERVICE_NAME }, 'failed to init tracing, continuing');
   }
 
+  try {
+    metrics.init();
+    const meter = metrics.getMeter(SERVICE_NAME);
+    heartbeatCounter = meter.createCounter('worker_heartbeat_total', {
+      description: 'Heartbeat emitted by the image processor worker',
+    });
+    jobsStartedCounter = meter.createCounter('image_jobs_started_total', {
+      description: 'Image processing jobs started',
+    });
+    jobsCompletedCounter = meter.createCounter('image_jobs_completed_total', {
+      description: 'Image processing jobs completed successfully',
+    });
+    jobsFailedCounter = meter.createCounter('image_jobs_failed_total', {
+      description: 'Image processing jobs that failed',
+    });
+  } catch (err) {
+    logger.warn({ err, service: SERVICE_NAME }, 'metrics unavailable; counters degraded to no-ops');
+  }
+
   // Metrics heartbeat
   const heartbeat = setInterval(() => {
-    try {
-      metrics
-        .counter('worker_heartbeat_total', {
-          service: SERVICE_NAME,
-        })
-        .add(1);
-    } catch {
-      // best-effort
-    }
+    heartbeatCounter?.add(1, { service: SERVICE_NAME });
   }, 15_000);
   heartbeat.unref();
 
@@ -159,27 +188,35 @@ async function main() {
     'starting image worker …',
   );
 
-  worker = await createImageWorker({
-    concurrency: CONCURRENCY,
-    // You can pass additional hooks if your worker supports them
-    onActive(job) {
-      logger.info({ jobId: job.id, name: job.name, service: SERVICE_NAME }, 'job started');
-      try {
-        metrics.counter('image_jobs_started_total').add(1);
-      } catch {}
-    },
-    onCompleted(job, result) {
-      logger.info({ jobId: job.id, name: job.name, service: SERVICE_NAME }, 'job completed');
-      try {
-        metrics.counter('image_jobs_completed_total').add(1);
-      } catch {}
-    },
-    onFailed(job, err) {
-      logger.error({ jobId: job?.id, name: job?.name, err, service: SERVICE_NAME }, 'job failed');
-      try {
-        metrics.counter('image_jobs_failed_total').add(1);
-      } catch {}
-    },
+  const startedWorker = await startImageWorker({
+    worker: { concurrency: CONCURRENCY },
+  });
+
+  worker = startedWorker as WorkerLike;
+
+  if (!worker) {
+    throw new Error('image worker failed to start');
+  }
+
+  worker.on('active', (job: WorkerJob) => {
+    const jobId = job.id ?? 'unknown';
+    const jobName = job.name ?? 'unknown';
+    logger.info({ jobId, name: jobName, service: SERVICE_NAME }, 'job started');
+    jobsStartedCounter?.add(1, { service: SERVICE_NAME });
+  });
+
+  worker.on('completed', (job: WorkerJob, result: unknown) => {
+    const jobId = job.id ?? 'unknown';
+    const jobName = job.name ?? 'unknown';
+    logger.info({ jobId, name: jobName, service: SERVICE_NAME, result }, 'job completed');
+    jobsCompletedCounter?.add(1, { service: SERVICE_NAME });
+  });
+
+  worker.on('failed', (job: WorkerJob | undefined, err: unknown) => {
+    const jobId = job?.id ?? 'unknown';
+    const jobName = job?.name ?? 'unknown';
+    logger.error({ jobId, name: jobName, err, service: SERVICE_NAME }, 'job failed');
+    jobsFailedCounter?.add(1, { service: SERVICE_NAME });
   });
 
   logger.info(

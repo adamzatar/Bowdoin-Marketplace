@@ -12,7 +12,7 @@
     "rootDir": ".",
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo",
-    "moduleResolution": "bundler",
+    "moduleResolution": "Bundler",
     "verbatimModuleSyntax": true,
     "module": "ESNext",
     "target": "ES2022",

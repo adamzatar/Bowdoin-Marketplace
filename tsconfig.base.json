@@ -44,6 +44,8 @@
       "@observability/*": ["packages/observability/src/*"],
       "@queue": ["packages/queue/src/index.ts"],
       "@queue/*": ["packages/queue/src/*"],
+      "@bowdoin/queue": ["packages/queue/src/index.ts"],
+      "@bowdoin/queue/*": ["packages/queue/src/*"],
       "@rate-limit": ["packages/rate-limit/src/index.ts"],
       "@rate-limit/*": ["packages/rate-limit/src/*"],
       "@security": ["packages/security/src/index.ts"],
@@ -57,6 +59,8 @@
       
 
       /* Frontend app alias (used by server route handlers and RSC code) */
+      "@/server": ["apps/web/src/server/index.ts"],
+      "@/server/*": ["apps/web/src/server/*"],
       "@/*": ["apps/web/src/*"]
 
     },
@@ -73,6 +77,7 @@
     "packages/**/*.ts",
     "packages/**/*.tsx",
     "scripts/**/*.ts",
+    "tools/**/*.ts",
     "infra/**/*.ts",
     "*.ts"
   ],

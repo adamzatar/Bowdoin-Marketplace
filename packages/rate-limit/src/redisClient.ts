@@ -3,12 +3,12 @@
 /**
  * Redis client singleton for rate-limit package.
  * - Optional dependency on @bowdoin/observability/logger (loaded at runtime)
- * - Explicit Node ESM globals (import process + console from node:)
+ * - Uses Node's console module with a local Console instance as fallback
  */
 
-import { createRequire } from "node:module";
-import process from "node:process";
-import { console as nodeConsole } from "node:console";
+import { Console } from "console";
+import { createRequire } from "module";
+import process from "process";
 
 import { createClient, type RedisClientType } from "redis";
 
@@ -17,12 +17,22 @@ const require = createRequire(import.meta.url);
 let _client: RedisClientType | null = null;
 let _connecting: Promise<RedisClientType> | null = null;
 
-type MinimalLogger = Pick<Console, "info" | "warn" | "error">;
+/* Narrow, runtime-only logger shape (avoid global Console typings) */
+type MinimalLogger = {
+  info?: (...args: unknown[]) => void;
+  warn?: (...args: unknown[]) => void;
+  error?: (...args: unknown[]) => void;
+};
+
+/** Local, typed fallback logger using Node's Console class. */
+const fallbackConsole: MinimalLogger = new Console({
+  stdout: process.stdout,
+  stderr: process.stderr,
+}) as unknown as MinimalLogger;
 
 /**
  * Soft-optional logger from @bowdoin/observability/logger.
  * Loaded via createRequire to avoid static resolution (keeps this pkg standalone).
- * Synchronous (no require-await lint).
  */
 function getLogger(): MinimalLogger {
   try {
@@ -32,7 +42,7 @@ function getLogger(): MinimalLogger {
   } catch {
     // module not present in this consumer — fall through
   }
-  return nodeConsole;
+  return fallbackConsole;
 }
 
 function maskUrl(u: string): string {

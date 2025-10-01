@@ -1,29 +1,26 @@
 // apps/web/app/api/messages/threads/route.ts
 //
 // Threads collection
-// - GET: list current user's threads (with last message + unread count)
+// - GET: list current user's threads (with last message summary)
 // - POST: create (or reuse) a thread for a listing and send the first message
 //
 // Security / behavior
 // - Auth required
 // - Server-side validation via zod
 // - Rate-limited (list + create)
-// - Never leaks the other participant’s email or PII
-// - Response contracts align with @bowdoin/contracts (best-effort runtime check)
-
-import { Messages } from '@bowdoin/contracts/schemas/messages';
-import { prisma } from '@bowdoin/db';
-import { z } from 'zod';
-
-import type { NextRequest } from 'next/server';
-
-import { jsonError } from '../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../src/server/rateLimit';
-import { withAuth } from '../../../../src/server/withAuth';
+// - Never leaks the other participant’s PII
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
+
+import { prisma } from '@bowdoin/db';
+import { z } from 'zod';
+
+import { withAuth, rateLimit, jsonError } from '@/server';
+import type { Session } from '@/server';
+
+import type { Prisma } from '@prisma/client';
 
 const noStoreHeaders = {
   'content-type': 'application/json; charset=utf-8',
@@ -32,6 +29,8 @@ const noStoreHeaders = {
   expires: '0',
   vary: 'Cookie',
 };
+
+const withStrictAuth = withAuth<{ params?: Record<string, string>; ip: string }>();
 
 // ---------- Validators
 
@@ -42,210 +41,139 @@ const ListQueryZ = z.object({
 
 const CreateBodyZ = z.object({
   listingId: z.string().uuid(),
-  // Optional explicit recipient; when omitted we infer seller/buyer by listing owner
   toUserId: z.string().uuid().optional(),
   text: z.string().trim().min(1).max(2000),
 });
 
-// ---------- Shapes / helpers
+// ---------- Helpers
 
-type ThreadRow = {
+type MaybeSessionUser = Session['user'];
+
+type ThreadSummary = {
   id: string;
-  listingId: string;
-  createdAt: Date;
-  updatedAt: Date;
-  lastMessageAt: Date | null;
-  participants: Array<{ userId: string; lastReadAt: Date | null }>;
   listing: {
     id: string;
     title: string;
-    priceCents: number;
-    currency: string;
+    price: number;
     sellerId: string;
-    images: string[];
-    soldAt: Date | null;
-  };
+  } | null;
+  otherUserId: string;
   lastMessage: {
     id: string;
     senderId: string;
-    createdAt: Date;
+    sentAt: Date;
     text: string;
   } | null;
   unreadCount: number;
+  lastMessageAt: Date | null;
+  updatedAt: Date;
+  createdAt: Date;
 };
 
-function toThreadSummary(row: ThreadRow, viewerId: string) {
-  const otherId =
-    row.participants.map((p) => p.userId).find((id) => id !== viewerId) ??
-    row.participants[0]?.userId ??
-    viewerId;
-
-  const payload: Messages.ThreadSummary = {
-    id: row.id,
+function toThreadSummary(
+  thread: {
+    id: string;
     listing: {
-      id: row.listing.id,
-      title: row.listing.title,
-      price: row.listing.priceCents / 100,
-      currency: row.listing.currency,
-      image: row.listing.images?.[0] ?? null,
-      soldAt: row.listing.soldAt,
-      sellerId: row.listing.sellerId,
-    },
-    otherUserId: otherId,
-    lastMessage: row.lastMessage
+      id: string;
+      title: string;
+      price: unknown;
+      userId: string;
+    } | null;
+    buyerId: string;
+    sellerId: string;
+    createdAt: Date;
+    messages: Array<{ id: string; senderId: string; sentAt: Date; body: string }>;
+  },
+  viewerId: string,
+): ThreadSummary {
+  const last = thread.messages[0] ?? null;
+  const otherUserId = viewerId === thread.sellerId ? thread.buyerId : thread.sellerId;
+
+  const listing = thread.listing
+    ? {
+        id: thread.listing.id,
+        title: thread.listing.title,
+        price: typeof thread.listing.price === 'number'
+          ? thread.listing.price
+          : Number(thread.listing.price ?? 0),
+        sellerId: thread.sellerId,
+      }
+    : null;
+
+  return {
+    id: thread.id,
+    listing,
+    otherUserId,
+    lastMessage: last
       ? {
-          id: row.lastMessage.id,
-          senderId: row.lastMessage.senderId,
-          createdAt: row.lastMessage.createdAt,
-          text: row.lastMessage.text,
+          id: last.id,
+          senderId: last.senderId,
+          sentAt: last.sentAt,
+          text: last.body,
         }
       : null,
-    unreadCount: row.unreadCount,
-    lastMessageAt: row.lastMessageAt,
-    updatedAt: row.updatedAt,
-    createdAt: row.createdAt,
+    unreadCount: 0,
+    lastMessageAt: last?.sentAt ?? null,
+    updatedAt: last?.sentAt ?? thread.createdAt,
+    createdAt: thread.createdAt,
   };
-
-  if (process.env.NODE_ENV !== 'production') {
-    try {
-      Messages.ThreadSummaryZ.parse(payload);
-    } catch {
-      // contract drift will be caught in tests; don't break prod
-    }
-  }
-
-  return payload;
 }
 
 // ---------- GET /api/messages/threads
 
-export const GET = withAuth(async (req, ctx) => {
-  const viewerId = ctx.session.user.id;
+export const GET = withStrictAuth(async (req, ctx) => {
+  const user = ctx.session?.user;
+  const viewerId = typeof user?.id === 'string' ? user.id : null;
+  if (!viewerId) return jsonError(403, 'forbidden');
+
+  try {
+    await Promise.all([
+      rateLimit(`rl:threads:list:user:${viewerId}`, 120, 60),
+      rateLimit(`rl:threads:list:ip:${ctx.ip}`, 240, 60),
+    ]);
+  } catch {
+    return jsonError(429, 'too_many_requests');
+  }
+
   const url = new URL(req.url);
   const parsed = ListQueryZ.safeParse(Object.fromEntries(url.searchParams));
   if (!parsed.success) return jsonError(400, 'invalid_query');
   const { page, pageSize } = parsed.data;
 
-  // Rate limit: list threads
-  try {
-    await Promise.all([
-      rateLimit(`rl:threads:list:user:${viewerId}`, 120, 60), // 120/min per user
-      rateLimit(`rl:threads:list:ip:${ctx.ip}`, 240, 60),
-    ]);
-  } catch {
-    return jsonError(429, 'Too many requests');
-  }
-
   const skip = (page - 1) * pageSize;
   const take = pageSize;
 
+  const where: Prisma.ThreadWhereInput = {
+    OR: [{ buyerId: viewerId }, { sellerId: viewerId }],
+  };
+
   try {
-    // We need: threads where viewer participates, with:
-    // - lastMessage (by createdAt desc)
-    // - unreadCount for viewer
-    // Prisma pattern: compute unread via _count with filter
     const [total, rows] = await Promise.all([
-      prisma.messageThread.count({
-        where: {
-          participants: { some: { userId: viewerId } },
-        },
-      }),
-      prisma.messageThread.findMany({
-        where: {
-          participants: { some: { userId: viewerId } },
-        },
-        orderBy: [{ lastMessageAt: 'desc' as const }, { updatedAt: 'desc' as const }],
+      prisma.thread.count({ where }),
+      prisma.thread.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
         skip,
         take,
         include: {
-          participants: {
-            select: { userId: true, lastReadAt: true },
-          },
           listing: {
             select: {
               id: true,
               title: true,
-              priceCents: true,
-              currency: true,
-              images: true,
-              sellerId: true,
-              soldAt: true,
+              price: true,
+              userId: true,
             },
           },
           messages: {
-            orderBy: { createdAt: 'desc' },
+            orderBy: { sentAt: 'desc' },
             take: 1,
-            select: { id: true, senderId: true, createdAt: true, text: true },
-          },
-          _count: {
-            select: {
-              messages: {
-                where: {
-                  // unread = messages after user's lastReadAt and not sent by the viewer
-                  AND: [
-                    { senderId: { not: viewerId } },
-                    {
-                      // Fallback when no participant record (shouldn't happen): treat all as unread
-                      OR: [
-                        {
-                          createdAt: {
-                            gt:
-                              // Use a subquery-like approach: we’ll compute in JS below if needed
-                              // (Prisma cannot reference participant.lastReadAt in where directly)
-                              new Date(0),
-                          },
-                        },
-                      ],
-                    },
-                  ],
-                },
-              },
-            },
+            select: { id: true, senderId: true, sentAt: true, body: true },
           },
         },
       }),
     ]);
 
-    // Because we couldn't reference participant.lastReadAt for the viewer inside _count filter,
-    // refine unread count in JS.
-    const data = await Promise.all(
-      rows.map(async (t): Promise<ThreadRow> => {
-        const viewerPart = t.participants.find((p) => p.userId === viewerId);
-        const lastReadAt = viewerPart?.lastReadAt ?? new Date(0);
-
-        // Compute accurate unread count
-        const unreadCount = await prisma.message.count({
-          where: {
-            threadId: t.id,
-            senderId: { not: viewerId },
-            createdAt: { gt: lastReadAt },
-          },
-        });
-
-        const last = t.messages[0] ?? null;
-
-        return {
-          id: t.id,
-          listingId: t.listing.id,
-          createdAt: t.createdAt,
-          updatedAt: t.updatedAt,
-          lastMessageAt: (t as any).lastMessageAt ?? last?.createdAt ?? t.updatedAt,
-          participants: t.participants,
-          listing: t.listing as ThreadRow['listing'],
-          lastMessage: last
-            ? {
-                id: last.id,
-                senderId: last.senderId,
-                createdAt: last.createdAt,
-                text: last.text,
-              }
-            : null,
-          unreadCount,
-        };
-      }),
-    );
-
-    const items = data.map((r) => toThreadSummary(r, viewerId));
+    const items = rows.map((thread) => toThreadSummary(thread, viewerId));
     const hasMore = skip + rows.length < total;
 
     return new Response(
@@ -255,135 +183,79 @@ export const GET = withAuth(async (req, ctx) => {
         headers: noStoreHeaders,
       },
     );
-  } catch (err) {
+  } catch {
     return jsonError(500, 'threads_list_failed');
   }
 });
 
 // ---------- POST /api/messages/threads
 
-export const POST = withAuth(async (req, ctx) => {
-  const viewerId = ctx.session.user.id;
+export const POST = withStrictAuth(async (req, ctx) => {
+  const user = ctx.session?.user;
+  const viewerId = typeof user?.id === 'string' ? user.id : null;
+  if (!viewerId) return jsonError(403, 'forbidden');
 
-  // Rate limit: create / first message
   try {
     await Promise.all([
-      rateLimit(`rl:threads:create:user:${viewerId}`, 20, 60), // 20/min hard cap
+      rateLimit(`rl:threads:create:user:${viewerId}`, 20, 60),
       rateLimit(`rl:messages:first:user:${viewerId}`, 30, 60),
       rateLimit(`rl:threads:create:ip:${ctx.ip}`, 60, 60),
     ]);
   } catch {
-    return jsonError(429, 'Too many requests');
+    return jsonError(429, 'too_many_requests');
   }
 
-  let body: z.infer<typeof CreateBodyZ>;
-  try {
-    body = CreateBodyZ.parse(await req.json());
-  } catch {
-    return jsonError(400, 'invalid_body');
-  }
+  const parsedBody = CreateBodyZ.safeParse(await req.json());
+  if (!parsedBody.success) return jsonError(400, 'invalid_body');
+  const body = parsedBody.data;
 
-  // Guard: listing must exist; infer recipient if missing
   const listing = await prisma.listing.findUnique({
     where: { id: body.listingId },
-    select: {
-      id: true,
-      sellerId: true,
-      title: true,
-      soldAt: true,
-    },
+    select: { id: true, userId: true },
   });
   if (!listing) return jsonError(404, 'listing_not_found');
 
-  const isSeller = listing.sellerId === viewerId;
-  const recipientId = body.toUserId ?? (isSeller ? undefined : listing.sellerId);
-  if (!recipientId) {
-    return jsonError(400, 'recipient_missing');
-  }
-  if (recipientId === viewerId) {
-    return jsonError(400, 'cannot_message_self');
-  }
+  const sellerId = listing.userId;
+  const isSeller = sellerId === viewerId;
+  const buyerId = isSeller ? body.toUserId : viewerId;
 
-  // If listing is sold, still allow messaging within existing thread (e.g., coordination),
-  // but do not create new thread unless viewer already participated before sale.
-  // We implement a soft guard: allow creation if not sold OR if an existing thread exists.
-  const existing = await prisma.messageThread.findFirst({
-    where: {
-      listingId: listing.id,
-      participants: { every: { userId: { in: [viewerId, recipientId] } } },
-    },
-    select: { id: true },
-  });
-
-  if (listing.soldAt && !existing) {
-    return jsonError(409, 'listing_already_sold');
-  }
+  if (!buyerId) return jsonError(400, 'recipient_missing');
+  if (buyerId === sellerId) return jsonError(400, 'cannot_message_self');
 
   try {
-    const thread = await prisma.$transaction(async (tx) => {
-      // Find-or-create thread for {listing, viewer, recipient}
-      const found = existing
-        ? await tx.messageThread.update({
-            where: { id: existing.id },
-            data: { updatedAt: new Date() },
-          })
-        : await tx.messageThread.create({
-            data: {
-              listingId: listing.id,
-              participants: {
-                createMany: {
-                  data: [{ userId: viewerId }, { userId: recipientId }],
-                },
-              },
-            },
-          });
-
-      // Create first/new message
-      const msg = await tx.message.create({
-        data: {
-          threadId: found.id,
-          senderId: viewerId,
-          text: body.text,
+    const thread = await prisma.thread.upsert({
+      where: {
+        listingId_buyerId: {
+          listingId: listing.id,
+          buyerId,
         },
-      });
-
-      // Update thread lastMessageAt and bump updatedAt
-      await tx.messageThread.update({
-        where: { id: found.id },
-        data: { lastMessageAt: msg.createdAt, updatedAt: new Date() },
-      });
-
-      // Mark sender as read through this message
-      await tx.messageParticipant.updateMany({
-        where: { threadId: found.id, userId: viewerId },
-        data: { lastReadAt: msg.createdAt },
-      });
-
-      return { threadId: found.id, message: msg };
-    });
-
-    const response: Messages.ThreadCreateResponse = {
-      ok: true,
-      data: {
-        threadId: thread.threadId,
-        messageId: thread.message.id,
       },
-    };
-
-    if (process.env.NODE_ENV !== 'production') {
-      try {
-        Messages.ThreadCreateResponseZ.parse(response);
-      } catch {
-        // ignore in prod
-      }
-    }
-
-    return new Response(JSON.stringify(response), {
-      status: 201,
-      headers: noStoreHeaders,
+      update: {},
+      create: {
+        listingId: listing.id,
+        sellerId,
+        buyerId,
+      },
+      select: { id: true },
     });
-  } catch (err) {
-    // Unique constraints could race on find-or-create; retry once on known conflict
+
+    const message = await prisma.message.create({
+      data: {
+        threadId: thread.id,
+        senderId: viewerId,
+        body: body.text,
+      },
+      select: { id: true },
+    });
+
+    return new Response(
+      JSON.stringify({ ok: true, data: { threadId: thread.id, messageId: message.id } }),
+      {
+        status: 201,
+        headers: noStoreHeaders,
+      },
+    );
+  } catch {
     return jsonError(500, 'thread_create_failed');
   }
 });

@@ -1,0 +1,17 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./apps/web" },
+    { "path": "./packages/auth" },
+    { "path": "./packages/config" },
+    { "path": "./packages/contracts" },
+    { "path": "./packages/db" },
+    { "path": "./packages/email" },
+    { "path": "./packages/observability" },
+    { "path": "./packages/queue" },
+    { "path": "./packages/rate-limit" },
+    { "path": "./packages/security" },
+    { "path": "./packages/storage" },
+    { "path": "./packages/utils" }
+  ]
+}

@@ -1,10 +1,6 @@
 /**
  * @module @bowdoin/utils/errors
  * Centralized error primitives for API, workers, and UI-boundary mapping.
- * - Typed AppError with stable codes
- * - Result<T, E> helpers for functional flows
- * - Safe serialization and HTTP mapping
- * - Minimal and dependency-free
  */
 
 export type AppErrorCode =
@@ -20,13 +16,9 @@ export type AppErrorCode =
   | 'INTERNAL';
 
 export interface AppErrorOptions {
-  /** HTTP status override; inferred from code if omitted */
   status?: number;
-  /** Arbitrary, non-sensitive structured data (e.g., validation field errors) */
   details?: unknown;
-  /** If true, message is safe to show to end users */
   expose?: boolean;
-  /** Underlying cause (not serialized unless safe) */
   cause?: unknown;
 }
 
@@ -41,10 +33,11 @@ export class AppError extends Error {
   readonly expose: boolean;
 
   constructor(code: AppErrorCode, message: string, opts: AppErrorOptions = {}) {
-    // Pass cause to the base Error so `err.cause` is standard-compliant
+    // Pass cause to base Error so `err.cause` is standard-compliant
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore - cause is supported in Node 16.9+; TS lib may lag in some configs
     super(message, { cause: opts.cause });
 
-    // Maintains proper prototype chain in TS when targeting ES2019+
     Object.setPrototypeOf(this, new.target.prototype);
 
     this.code = code;
@@ -52,12 +45,22 @@ export class AppError extends Error {
     this.details = opts.details;
     this.expose = opts.expose ?? defaultExpose(code);
 
-    // Better stacks in Node
-    if ((Error as any).captureStackTrace) {
-      (Error as any).captureStackTrace(this, AppError);
+    if (captureStackTrace) {
+      // Node’s API: captureStackTrace(targetObject, constructorOpt?: Function)
+      captureStackTrace(this, AppError);
     }
   }
 }
+
+// Use Node’s actual typing for captureStackTrace to avoid constructor signature mismatches.
+type CaptureStackTrace = (targetObject: object, constructorOpt?: Function) => void;
+
+function resolveCaptureStackTrace(): CaptureStackTrace | undefined {
+  const maybe = (Error as { captureStackTrace?: CaptureStackTrace }).captureStackTrace;
+  return typeof maybe === 'function' ? maybe : undefined;
+}
+
+const captureStackTrace = resolveCaptureStackTrace();
 
 /** Map canonical codes to HTTP status. */
 export function codeToHttpStatus(code: AppErrorCode): number {
@@ -98,28 +101,26 @@ function defaultExpose(code: AppErrorCode): boolean {
 
 /** Type guard. */
 export function isAppError(e: unknown): e is AppError {
-  return !!e && typeof e === 'object' && (e as any).name === 'AppError' && 'code' in (e as any);
+  return isRecord(e) && e.name === 'AppError' && 'code' in e;
 }
 
-/**
- * Normalize unknown errors into AppError. Useful in catch-all boundaries.
- * @example
- * try { ... } catch (e) { throw toAppError(e, 'INTERNAL') }
- */
+/** Normalize unknown errors into AppError. */
 export function toAppError(e: unknown, fallback: AppErrorCode = 'INTERNAL'): AppError {
   if (isAppError(e)) return e;
-
-  // Best-effort handling of common error shapes
-  const anyErr = e as any;
-  const message =
-    typeof anyErr?.message === 'string'
-      ? anyErr.message
-      : typeof e === 'string'
-      ? e
-      : 'Unexpected error';
-
-  // Heuristics for Node/Fetch/Prisma/etc. can be added here if needed.
+  const message = extractMessage(e) ?? 'Unexpected error';
   return new AppError(fallback, message, { cause: e, expose: fallback !== 'INTERNAL' });
+}
+
+function extractMessage(value: unknown): string | null {
+  if (typeof value === 'string') return value;
+  if (isRecord(value) && typeof (value as { message?: unknown }).message === 'string') {
+    return (value as { message: string }).message;
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 /** Shape used for HTTP JSON error payloads. */
@@ -128,14 +129,10 @@ export interface ErrorBody {
     code: AppErrorCode;
     message: string;
     details?: unknown;
-    // requestId, traceId can be merged by the HTTP layer
   };
 }
 
-/**
- * Serialize an AppError to a safe JSON payload for HTTP responses.
- * Strips stack/cause and only includes `details` if the error is exposable.
- */
+/** Serialize an AppError to a safe JSON payload for HTTP responses. */
 export function toErrorBody(err: AppError | unknown): ErrorBody {
   const e = isAppError(err) ? err : toAppError(err, 'INTERNAL');
   const message = e.expose ? e.message : statusText(e.status);
@@ -184,12 +181,6 @@ export function err<E = AppError>(error: E): Err<E> {
   return { ok: false, error };
 }
 
-/**
- * Run an async function and capture errors as Result.
- * @example
- * const res = await safe(async () => await repo.create(data));
- * if (!res.ok) return handle(res.error);
- */
 export async function safe<T>(fn: () => Promise<T>): Promise<Result<T>> {
   try {
     return ok(await fn());
@@ -198,7 +189,6 @@ export async function safe<T>(fn: () => Promise<T>): Promise<Result<T>> {
   }
 }
 
-/** Assertion that throws AppError on failure (better than raw `assert`). */
 export function assert(
   condition: unknown,
   code: AppErrorCode,
@@ -208,15 +198,11 @@ export function assert(
   if (!condition) throw new AppError(code, message, opts);
 }
 
-/** Domain-friendly invariant helper mapped to INTERNAL errors. */
 export function invariant(condition: unknown, message = 'Invariant violated'): asserts condition {
   if (!condition) throw new AppError('INTERNAL', message);
 }
 
-/**
- * Redact common sensitive keys from a plain object/array. No-op for primitives/undefined.
- * Non-recursive by default (deep = false) for performance; enable as needed.
- */
+/** Redact common sensitive keys from plain objects/arrays. */
 export function redact<T>(input: T, deep = false): T {
   if (!input || typeof input !== 'object') return input;
 
@@ -252,40 +238,25 @@ export function redact<T>(input: T, deep = false): T {
   return out as T;
 }
 
-/**
- * Convert a typical schema/validation error (e.g., Zod-like) to AppError.
- * Avoids a hard dep on zod by duck-typing { issues?: Array<{ path?: (string|number)[], message: string }> }.
- */
+/** Convert duck-typed validation issues to a VALIDATION AppError. */
 export function toValidationError(
   message: string,
   issues?: Array<{ path?: Array<string | number>; message: string }>,
 ): AppError {
   const details =
     issues && issues.length
-      ? issues.map((i) => ({
-          path: i.path?.join('.') ?? '',
-          message: i.message,
-        }))
+      ? issues.map((i) => ({ path: i.path?.join('.') ?? '', message: i.message }))
       : undefined;
   return new AppError('VALIDATION', message, { details, expose: true });
 }
 
-/**
- * Narrow a thrown error into HTTP pieces (status + body) for route handlers.
- * @example
- * const { status, body } = asHttp(e); return new Response(JSON.stringify(body), { status })
- */
+/** HTTP helper for route handlers. */
 export function asHttp(e: unknown): { status: number; body: ErrorBody } {
   const app = toAppError(e);
   return { status: app.status, body: toErrorBody(app) };
 }
 
-/**
- * Create a namespaced error factory for a subsystem.
- * @example
- * const authErr = makeErrorFactory('auth');
- * throw authErr('UNAUTHORIZED', 'Session expired', { expose: true });
- */
+/** Namespaced error factory. */
 export function makeErrorFactory(namespace: string) {
   return (code: AppErrorCode, message: string, opts?: AppErrorOptions) =>
     new AppError(code, `[${namespace}] ${message}`, opts);

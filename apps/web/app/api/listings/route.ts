@@ -4,68 +4,137 @@
 // - GET: list & paginate listings with basic filters
 // - POST: create a new listing (authenticated)
 // - Includes input validation (zod), rate limiting, auditing, and cache control
-//
-// Dependencies expected in the monorepo:
-//   - @bowdoin/db -> exports `prisma`
-//   - @bowdoin/contracts/schemas/listings -> zod schemas used below
-//   - Local server utils: rateLimit, errorHandler, withAuth, audit
 
-import { ListingCreateInputZ, ListingPublicZ } from '@bowdoin/contracts/schemas/listings';
-import { prisma } from '@bowdoin/db';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 import { headers } from 'next/headers';
+
+import { prisma } from '@bowdoin/db';
 import { z } from 'zod';
+import { withAuth, rateLimit, auditEvent, jsonError } from '@/server';
 
-import type { NextRequest } from 'next/server';
+import type { Prisma } from '@prisma/client';
 
-import { emitAuditEvent } from '../../../src/server/handlers/audit';
-import { jsonError } from '../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../src/server/rateLimit';
-import { requireSession } from '../../../src/server/withAuth';
-
-// Prefer using the canonical contracts schemas if present.
-
-// If your contracts don’t yet include query params, we define them here.
-// Cursor is an encoded string of the last item’s ID (or createdAt+id).
 const QueryParamsZ = z.object({
   q: z.string().trim().max(200).optional(),
   category: z.string().trim().max(64).optional(),
   audience: z.enum(['public', 'community']).optional(),
   minPrice: z.coerce.number().min(0).max(1_000_000).optional(),
   maxPrice: z.coerce.number().min(0).max(1_000_000).optional(),
-  // simple cursor; you can switch to opaque Base64 with createdAt|id if you prefer
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(50).default(20),
-  // include sold?
   includeSold: z.coerce.boolean().optional().default(false),
 });
 
-// Safety: don’t cache dynamic API responses
+const CreateListingZ = z.object({
+  title: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(4_000).optional(),
+  price: z.number().nonnegative(),
+  audience: z.enum(['public', 'community']).optional(),
+  category: z.string().trim().max(64).optional(),
+});
+
 const noStore = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store, no-cache, must-revalidate, private',
   pragma: 'no-cache',
   expires: '0',
   vary: 'Cookie',
+} as const;
+
+const listingSelect = {
+  id: true,
+  userId: true,
+  title: true,
+  description: true,
+  price: true,
+  isFree: true,
+  condition: true,
+  audience: true,
+  status: true,
+  category: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+type ListingRecord = Prisma.ListingGetPayload<{ select: typeof listingSelect }>;
+
+type PublicListing = {
+  id: string;
+  title: string;
+  description: string;
+  price: number;
+  isFree: boolean;
+  audience: 'public' | 'community';
+  category: string | null;
+  condition: string | null;
+  status: 'active' | 'sold' | 'expired' | 'removed';
+  sellerId: string;
+  createdAt: Date;
+  updatedAt: Date;
 };
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
+type DbAudience = 'PUBLIC' | 'CAMPUS';
+type DbStatus = 'ACTIVE' | 'SOLD' | 'EXPIRED' | 'REMOVED';
+type DbCondition = string;
+
+function toAudienceEnum(input: 'public' | 'community'): DbAudience {
+  return input === 'public' ? 'PUBLIC' : 'CAMPUS';
+}
+
+function toPublicAudience(input: DbAudience): 'public' | 'community' {
+  return input === 'PUBLIC' ? 'public' : 'community';
+}
+
+function toPublicStatus(status: DbStatus): 'active' | 'sold' | 'expired' | 'removed' {
+  switch (status) {
+    case 'SOLD':
+      return 'sold';
+    case 'EXPIRED':
+      return 'expired';
+    case 'REMOVED':
+      return 'removed';
+    case 'ACTIVE':
+    default:
+      return 'active';
+  }
+}
+
+function toPublicCondition(condition: DbCondition | null): string | null {
+  return condition ? condition.toLowerCase() : null;
+}
+
+function formatListing(listing: ListingRecord): PublicListing {
+  return {
+    id: listing.id,
+    title: listing.title,
+    description: listing.description ?? '',
+    price: Number(listing.price),
+    isFree: listing.isFree,
+    audience: toPublicAudience(listing.audience),
+    category: listing.category,
+    condition: toPublicCondition(listing.condition),
+    status: toPublicStatus(listing.status),
+    sellerId: listing.userId,
+    createdAt: listing.createdAt,
+    updatedAt: listing.updatedAt,
+  };
+}
 
 /** GET /api/listings */
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   const hdrs = headers();
   const ip =
     hdrs.get('x-forwarded-for')?.split(',')[0]?.trim() || hdrs.get('x-real-ip') || '0.0.0.0';
 
-  // Rate limit by IP for anonymous browsing (burst 120/min)
   try {
     await rateLimit(`rl:listings:list:${ip}`, 120, 60);
   } catch {
     return jsonError(429, 'Too many requests');
   }
 
-  // Parse query params
   const url = new URL(req.url);
   const parsed = QueryParamsZ.safeParse(Object.fromEntries(url.searchParams.entries()));
   if (!parsed.success) {
@@ -74,35 +143,32 @@ export async function GET(req: NextRequest) {
       { status: 400, headers: noStore },
     );
   }
+
   const { q, category, audience, minPrice, maxPrice, cursor, limit, includeSold } = parsed.data;
 
-  // Build filters
-  const where: any = {};
+  const where: Prisma.ListingWhereInput = {};
   if (category) where.category = category;
-  if (audience) where.audience = audience;
-  if (!includeSold) where.soldAt = null;
+  if (audience) where.audience = toAudienceEnum(audience);
+  if (!includeSold) where.status = { not: 'SOLD' };
 
   if (minPrice != null || maxPrice != null) {
-    where.priceCents = {};
-    if (minPrice != null) where.priceCents.gte = Math.round(minPrice * 100);
-    if (maxPrice != null) where.priceCents.lte = Math.round(maxPrice * 100);
+    const priceFilter: Prisma.DecimalFilter = {};
+    if (minPrice != null) priceFilter.gte = minPrice;
+    if (maxPrice != null) priceFilter.lte = maxPrice;
+    where.price = priceFilter;
   }
 
-  // Basic text filter (fallback). If you added FTS, replace with your search view.
-  // We still include a minimal `contains` condition for q.
   if (q) {
     where.OR = [
       { title: { contains: q, mode: 'insensitive' } },
       { description: { contains: q, mode: 'insensitive' } },
-      { tags: { hasSome: q.split(/\s+/).filter(Boolean) } },
     ];
   }
 
-  // Cursor-based pagination: use id cursor (stable ordering by createdAt desc, id desc)
-  const take = limit + 1; // fetch one extra to compute nextCursor
+  const take = limit + 1;
   const orderBy = [{ createdAt: 'desc' as const }, { id: 'desc' as const }];
 
-  let cursorClause: any = undefined;
+  let cursorClause: Prisma.ListingWhereUniqueInput | undefined;
   if (cursor) {
     cursorClause = { id: cursor };
   }
@@ -111,58 +177,21 @@ export async function GET(req: NextRequest) {
     where,
     orderBy,
     take,
-    ...(cursorClause ? { skip: 1, cursor: cursorClause } : {}),
-    select: {
-      id: true,
-      title: true,
-      description: true,
-      priceCents: true,
-      currency: true,
-      audience: true,
-      category: true,
-      images: true,
-      tags: true,
-      sellerId: true,
-      createdAt: true,
-      updatedAt: true,
-      soldAt: true,
-    },
+    ...(cursorClause ? { cursor: cursorClause, skip: 1 } : {}),
+    select: listingSelect,
   });
 
-  // Compute next cursor
-  let nextCursor: string | null = null;
   let items = rows;
+  let nextCursor: string | null = null;
   if (rows.length > limit) {
-    const next = rows[rows.length - 1];
-    nextCursor = next.id;
-    items = rows.slice(0, limit);
+    const next = rows[rows.length - 1] ?? null;
+    if (next) {
+      nextCursor = next.id;
+      items = rows.slice(0, limit);
+    }
   }
 
-  // Map DB -> public contract (price in dollars etc.) if needed
-  const data = items.map((r) => {
-    const obj = {
-      id: r.id,
-      title: r.title,
-      description: r.description,
-      price: r.priceCents / 100,
-      currency: r.currency,
-      audience: r.audience,
-      category: r.category,
-      images: r.images,
-      tags: r.tags,
-      sellerId: r.sellerId,
-      createdAt: r.createdAt,
-      updatedAt: r.updatedAt,
-      soldAt: r.soldAt,
-    };
-    // Validate at the boundary in dev/test to catch drift (no-op cost in prod if you prefer)
-    try {
-      ListingPublicZ.parse(obj);
-    } catch {
-      // Don’t fail the request in prod; you can log if desired.
-    }
-    return obj;
-  });
+  const data = items.map(formatListing);
 
   return new Response(JSON.stringify({ data, nextCursor }), {
     status: 200,
@@ -171,20 +200,24 @@ export async function GET(req: NextRequest) {
 }
 
 /** POST /api/listings */
-export async function POST(req: NextRequest) {
-  const auth = await requireSession();
-  if (!auth.ok) return auth.error;
-  const session = auth.session;
+export const POST = withAuth()(async (req, ctx) => {
+  const userId = ctx.userId ?? ctx.session?.user?.id;
+  if (!userId) return jsonError(401, 'unauthorized');
 
-  // Rate limit per-user for creation (10/min acceptable burst)
   try {
-    await rateLimit(`rl:listings:create:${session.user.id}`, 10, 60);
+    await rateLimit(`rl:listings:create:${userId}`, 10, 60);
   } catch {
     return jsonError(429, 'Too many requests');
   }
 
-  const body = await req.json().catch(() => null as unknown as z.infer<typeof ListingCreateInputZ>);
-  const parsed = ListingCreateInputZ.safeParse(body);
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    body = null;
+  }
+
+  const parsed = CreateListingZ.safeParse(body);
   if (!parsed.success) {
     return new Response(
       JSON.stringify({ error: 'invalid_body', details: parsed.error.flatten() }),
@@ -193,76 +226,46 @@ export async function POST(req: NextRequest) {
   }
 
   const input = parsed.data;
-
-  // Normalize data
-  const priceCents = Math.round(input.price * 100);
+  const priceNum = input.price;
+  const isFree = priceNum === 0;
+  const audienceEnum = toAudienceEnum(input.audience ?? 'community');
 
   try {
     const created = await prisma.listing.create({
       data: {
+        userId,
         title: input.title,
-        description: input.description ?? '',
-        priceCents,
-        currency: input.currency ?? 'USD',
-        audience: input.audience ?? 'community',
+        description: input.description ?? null,
+        price: priceNum,
+        isFree,
+        audience: audienceEnum,
         category: input.category ?? null,
-        images: input.images ?? [],
-        tags: input.tags ?? [],
-        sellerId: session.user.id,
       },
-      select: {
-        id: true,
-        title: true,
-        description: true,
-        priceCents: true,
-        currency: true,
-        audience: true,
-        category: true,
-        images: true,
-        tags: true,
-        sellerId: true,
-        createdAt: true,
-        updatedAt: true,
-        soldAt: true,
-      },
+      select: listingSelect,
     });
 
-    const response = {
-      id: created.id,
-      title: created.title,
-      description: created.description,
-      price: created.priceCents / 100,
-      currency: created.currency,
-      audience: created.audience,
-      category: created.category,
-      images: created.images,
-      tags: created.tags,
-      sellerId: created.sellerId,
-      createdAt: created.createdAt,
-      updatedAt: created.updatedAt,
-      soldAt: created.soldAt,
-    };
+    const listing = formatListing(created);
 
-    // Audit fire-and-forget
-    emitAuditEvent('listing.created', {
-      actor: { type: 'user', id: session.user.id },
-      listingId: created.id,
-      priceCents: created.priceCents,
-      currency: created.currency,
-      audience: created.audience,
-      category: created.category ?? undefined,
-      tags: created.tags,
+    const priceCents = Math.round(listing.price * 100);
+    auditEvent('listing.created', {
+      actor: { type: 'user', id: userId },
+      listingId: listing.id,
+      priceCents,
+      currency: 'USD',
+      audience: listing.audience,
+      category: listing.category ?? undefined,
+      tags: [],
     }).catch(() => {});
 
-    return new Response(JSON.stringify({ ok: true, listing: response }), {
+    return new Response(JSON.stringify({ ok: true, listing }), {
       status: 201,
       headers: noStore,
     });
   } catch (err) {
-    emitAuditEvent('listing.create_failed', {
-      actor: { type: 'user', id: session.user.id },
+    auditEvent('listing.create_failed', {
+      actor: { type: 'user', id: userId },
       error: err instanceof Error ? err.message : String(err),
     }).catch(() => {});
     return jsonError(500, 'failed to create listing');
   }
-}
+});

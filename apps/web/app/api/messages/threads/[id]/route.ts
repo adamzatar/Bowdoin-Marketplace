@@ -9,21 +9,53 @@
 // - Strong validation via zod
 // - Per-user & per-IP rate limiting
 // - No PII leakage; only expose user IDs
-// - Responses are shaped to align with @bowdoin/contracts (best-effort runtime checks)
-
-import { Messages } from '@bowdoin/contracts/schemas/messages';
-import { prisma } from '@bowdoin/db';
-import { z } from 'zod';
-
-import type { NextRequest } from 'next/server';
-
-import { jsonError } from '../../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../../src/server/rateLimit';
-import { withAuth } from '../../../../../src/server/withAuth';
+// - DTO kept local (no contracts import)
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
+
+import process from 'node:process';
+
+import { prisma } from '@bowdoin/db';
+import { z } from 'zod';
+import { withAuth, rateLimit, jsonError } from '@/server';
+
+// ===== Response DTOs (local, minimal, contracts-free)
+
+const ThreadDetailZ = z.object({
+  id: z.string().uuid(),
+  archived: z.boolean(),
+  listing: z
+    .object({
+      id: z.string().uuid(),
+      title: z.string(),
+      // keep listing DTO lean; fields must exist in schema
+    })
+    .nullable(),
+  participants: z.array(
+    z.object({
+      userId: z.string().uuid(),
+      lastReadAt: z.date().nullable(),
+    }),
+  ),
+  otherUserId: z.string().uuid().nullable(),
+  lastMessage: z
+    .object({
+      id: z.string().uuid(),
+      senderId: z.string().uuid(),
+      sentAt: z.date(),
+      body: z.string(),
+    })
+    .nullable(),
+  counters: z.object({ unreadCount: z.number().int().nonnegative() }),
+  lastMessageAt: z.date().nullable(),
+  updatedAt: z.date(),
+  createdAt: z.date(),
+});
+type ThreadDetail = ReturnType<(typeof ThreadDetailZ)['parse']>;
+
+// ===== Utilities
 
 const noStoreHeaders = {
   'content-type': 'application/json; charset=utf-8',
@@ -31,167 +63,151 @@ const noStoreHeaders = {
   pragma: 'no-cache',
   expires: '0',
   vary: 'Cookie',
-};
+} as const;
 
-// --------- Validators
-
-const ParamsZ = z.object({
-  id: z.string().uuid(),
-});
+const ParamsZ = z.object({ id: z.string().uuid() });
 
 const PatchBodyZ = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('mark_read'),
-    // Optional explicit cut-off (ISO). If omitted, uses "now".
-    // We clamp to not exceed newest message timestamp to avoid future values.
     lastReadAt: z.string().datetime({ offset: true }).optional(),
   }),
   z.object({ action: z.literal('archive') }),
   z.object({ action: z.literal('unarchive') }),
 ]);
 
-// --------- Helpers
+type ThreadWithListing = {
+  id: string;
+  listingId: string;
+  sellerId: string;
+  buyerId: string;
+  createdAt: Date;
+  closedAt: Date | null;
+  listing: { id: string; title: string } | null;
+  messages: Array<{ id: string; senderId: string; sentAt: Date; body: string }>;
+};
 
-async function computeUnreadCount(threadId: string, viewerId: string, lastReadAt: Date | null) {
-  return prisma.message.count({
-    where: {
-      threadId,
-      senderId: { not: viewerId },
-      createdAt: { gt: lastReadAt ?? new Date(0) },
-    },
-  });
+// replace the whole function with this:
+function computeUnreadCount(_threadId: string, _viewerId: string): Promise<number> {
+  // Schema has no per-user read state yet; keep API stable while always reporting zero unread.
+  // Future: introduce ThreadReadReceipt and compute real counts here.
+  return Promise.resolve(0);
+}
+
+function getClientIp(req: Request): string {
+  const xf = req.headers.get('x-forwarded-for');
+  if (xf) {
+    const first = xf.split(',')[0]?.trim();
+    if (first) return first;
+  }
+  return req.headers.get('x-real-ip') ?? 'unknown';
+}
+
+function deriveParticipants(thread: ThreadWithListing): Array<{ userId: string; lastReadAt: Date | null }> {
+  const unique = new Set<string>([thread.sellerId, thread.buyerId]);
+  return Array.from(unique).map((userId) => ({ userId, lastReadAt: null }));
 }
 
 function toDetailPayload(input: {
-  thread: {
-    id: string;
-    createdAt: Date;
-    updatedAt: Date;
-    lastMessageAt: Date | null;
-    archived: boolean;
-    listing: {
-      id: string;
-      title: string;
-      priceCents: number;
-      currency: string;
-      images: string[];
-      sellerId: string;
-      soldAt: Date | null;
-    };
-    participants: Array<{ userId: string; lastReadAt: Date | null }>;
-  };
-  lastMessage: { id: string; senderId: string; createdAt: Date; text: string } | null;
+  thread: ThreadWithListing;
+  lastMessage: { id: string; senderId: string; sentAt: Date; body: string } | null;
   unreadCount: number;
   viewerId: string;
-}) {
+}): ThreadDetail {
   const { thread, lastMessage, unreadCount, viewerId } = input;
-  const otherUserId =
-    thread.participants.map((p) => p.userId).find((id) => id !== viewerId) ??
-    thread.participants[0]?.userId ??
-    viewerId;
+  const participants = deriveParticipants(thread);
+  const otherUserId = participants.map((p) => p.userId).find((id) => id !== viewerId) ?? null;
 
-  const payload: Messages.ThreadDetail = {
+  const lastMessageAt = lastMessage?.sentAt ?? null;
+  const updatedAt = lastMessageAt ?? thread.createdAt;
+
+  const payload: ThreadDetail = {
     id: thread.id,
-    archived: thread.archived,
-    listing: {
-      id: thread.listing.id,
-      title: thread.listing.title,
-      price: thread.listing.priceCents / 100,
-      currency: thread.listing.currency,
-      image: thread.listing.images?.[0] ?? null,
-      soldAt: thread.listing.soldAt,
-      sellerId: thread.listing.sellerId,
-    },
-    participants: thread.participants.map((p) => ({
-      userId: p.userId,
-      // Expose timestamp only; no PII
-      lastReadAt: p.lastReadAt,
-    })),
+    archived: Boolean(thread.closedAt),
+    listing: thread.listing ? { id: thread.listing.id, title: thread.listing.title } : null,
+    participants,
     otherUserId,
     lastMessage: lastMessage
       ? {
           id: lastMessage.id,
           senderId: lastMessage.senderId,
-          createdAt: lastMessage.createdAt,
-          text: lastMessage.text,
+          sentAt: lastMessage.sentAt,
+          body: lastMessage.body,
         }
       : null,
     counters: { unreadCount },
-    lastMessageAt: thread.lastMessageAt,
-    updatedAt: thread.updatedAt,
+    lastMessageAt,
+    updatedAt,
     createdAt: thread.createdAt,
   };
 
   if (process.env.NODE_ENV !== 'production') {
     try {
-      Messages.ThreadDetailZ.parse(payload);
+    ThreadDetailZ.parse(payload);
     } catch {
-      // contract drift will be caught during CI; do not disrupt prod
+      // Non-fatal during development; CI/type checks catch drift
     }
   }
 
   return payload;
 }
 
-// --------- GET /api/messages/threads/[id]
+function extractThreadId(url: string) {
+  const match = url.match(/\/api\/messages\/threads\/([^/]+)/);
+  return match?.[1];
+}
 
-export const GET = withAuth(async (req, ctx) => {
-  const viewerId = ctx.session.user.id;
+// ===== GET /api/messages/threads/[id]
 
-  // Rate limit: per-user & per-IP
+export const GET = withAuth()(async (req, ctx) => {
+  const viewerId = ctx.session?.user?.id ?? ctx.userId;
+  if (!viewerId) return jsonError(401, 'unauthorized');
+
   try {
+    const ip = getClientIp(req);
     await Promise.all([
-      rateLimit(`rl:thread:get:user:${viewerId}`, 300, 60), // up to 300/min
-      rateLimit(`rl:thread:get:ip:${ctx.ip}`, 600, 60),
+      rateLimit(`rl:thread:get:user:${viewerId}`, 300, 60),
+      rateLimit(`rl:thread:get:ip:${ip}`, 600, 60),
     ]);
   } catch {
     return jsonError(429, 'Too many requests');
   }
 
-  const match = req.nextUrl.pathname.match(/\/api\/messages\/threads\/([^/]+)/);
-  const id = match?.[1];
-  const parsed = ParamsZ.safeParse({ id });
+  const idRaw = extractThreadId(req.url);
+  const parsed = ParamsZ.safeParse({ id: idRaw });
   if (!parsed.success) return jsonError(400, 'invalid_thread_id');
 
   try {
-    const t = await prisma.messageThread.findFirst({
-      where: { id: parsed.data.id, participants: { some: { userId: viewerId } } },
+    const t = await prisma.thread.findFirst({
+      where: {
+        id: parsed.data.id,
+        OR: [{ sellerId: viewerId }, { buyerId: viewerId }],
+      },
       include: {
-        participants: { select: { userId: true, lastReadAt: true } },
-        listing: {
-          select: {
-            id: true,
-            title: true,
-            priceCents: true,
-            currency: true,
-            images: true,
-            sellerId: true,
-            soldAt: true,
-          },
-        },
+        listing: { select: { id: true, title: true } },
         messages: {
-          orderBy: { createdAt: 'desc' },
+          orderBy: { sentAt: 'desc' },
           take: 1,
-          select: { id: true, senderId: true, createdAt: true, text: true },
+          select: { id: true, senderId: true, sentAt: true, body: true },
         },
       },
     });
 
     if (!t) return jsonError(404, 'thread_not_found');
 
-    const viewerPart = t.participants.find((p) => p.userId === viewerId);
-    const unreadCount = await computeUnreadCount(t.id, viewerId, viewerPart?.lastReadAt ?? null);
+    const unreadCount = await computeUnreadCount(t.id, viewerId);
     const last = t.messages[0] ?? null;
 
     const payload = toDetailPayload({
       thread: {
         id: t.id,
+        listingId: t.listingId,
+        sellerId: t.sellerId,
+        buyerId: t.buyerId,
+        closedAt: t.closedAt,
         createdAt: t.createdAt,
-        updatedAt: t.updatedAt,
-        lastMessageAt: (t as any).lastMessageAt ?? last?.createdAt ?? t.updatedAt,
-        archived: (t as any).archived ?? false, // schema may have this column
         listing: t.listing,
-        participants: t.participants,
+        messages: t.messages,
       },
       lastMessage: last,
       unreadCount,
@@ -202,71 +218,51 @@ export const GET = withAuth(async (req, ctx) => {
       status: 200,
       headers: noStoreHeaders,
     });
-  } catch (err) {
+  } catch {
     return jsonError(500, 'thread_fetch_failed');
   }
 });
 
-// --------- PATCH /api/messages/threads/[id]
-//
-// Actions:
-//  - { action: "mark_read", lastReadAt?: ISOString }
-//  - { action: "archive" }
-//  - { action: "unarchive" }
+// ===== PATCH /api/messages/threads/[id]
 
-export const PATCH = withAuth(async (req, ctx) => {
-  const viewerId = ctx.session.user.id;
+export const PATCH = withAuth()(async (req, ctx) => {
+  const viewerId = ctx.session?.user?.id ?? ctx.userId;
+  if (!viewerId) return jsonError(401, 'unauthorized');
 
   try {
+    const ip = getClientIp(req);
     await Promise.all([
-      rateLimit(`rl:thread:patch:user:${viewerId}`, 90, 60), // 90/min per user
-      rateLimit(`rl:thread:patch:ip:${ctx.ip}`, 180, 60),
+      rateLimit(`rl:thread:patch:user:${viewerId}`, 90, 60),
+      rateLimit(`rl:thread:patch:ip:${ip}`, 180, 60),
     ]);
   } catch {
     return jsonError(429, 'Too many requests');
   }
 
-  const match = req.nextUrl.pathname.match(/\/api\/messages\/threads\/([^/]+)/);
-  const id = match?.[1];
-  const parsedId = ParamsZ.safeParse({ id });
+  const idRaw = extractThreadId(req.url);
+  const parsedId = ParamsZ.safeParse({ id: idRaw });
   if (!parsedId.success) return jsonError(400, 'invalid_thread_id');
 
-  let body: z.infer<typeof PatchBodyZ>;
-  try {
-    body = PatchBodyZ.parse(await req.json());
-  } catch {
-    return jsonError(400, 'invalid_body');
-  }
+  const parsedBody = PatchBodyZ.safeParse(await req.json());
+  if (!parsedBody.success) return jsonError(400, 'invalid_body');
+  const body = parsedBody.data;
 
-  // Ensure the viewer is a participant
-  const thread = await prisma.messageThread.findFirst({
-    where: { id: parsedId.data.id, participants: { some: { userId: viewerId } } },
+  const thread = await prisma.thread.findFirst({
+    where: {
+      id: parsedId.data.id,
+      OR: [{ sellerId: viewerId }, { buyerId: viewerId }],
+    },
     select: {
       id: true,
-      updatedAt: true,
-      lastMessageAt: true,
-      archived: true,
-      participants: { select: { userId: true, lastReadAt: true } },
+      createdAt: true,
+      closedAt: true,
     },
   });
   if (!thread) return jsonError(404, 'thread_not_found');
 
   try {
     if (body.action === 'mark_read') {
-      // Determine cut-off time: provided or now, but never in the future
-      const now = new Date();
-      const requested = body.lastReadAt ? new Date(body.lastReadAt) : now;
-      const cutoff = requested > now ? now : requested;
-
-      // We also clamp to the newest message timestamp (lastMessageAt) if present
-      const maxTs = thread.lastMessageAt ?? now;
-      const effective = cutoff > maxTs ? maxTs : cutoff;
-
-      await prisma.messageParticipant.updateMany({
-        where: { threadId: thread.id, userId: viewerId },
-        data: { lastReadAt: effective },
-      });
-
+      // Mark-read is currently a no-op because we lack per-user read state; keep legacy callers happy.
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: noStoreHeaders,
@@ -274,22 +270,17 @@ export const PATCH = withAuth(async (req, ctx) => {
     }
 
     if (body.action === 'archive' || body.action === 'unarchive') {
-      // Archiving is typically per-user. If your schema stores it on the thread, this will be global.
-      // Prefer per-user archive column (message_participants.archived) if available.
-      // We’ll try participant-level first, then fall back to thread-level.
-      const desired = body.action === 'archive';
+      const desiredClosedAt = body.action === 'archive' ? new Date() : null;
+      const current = thread.closedAt;
+      const isChange =
+        (desiredClosedAt === null && current !== null) ||
+        (desiredClosedAt !== null &&
+          (current === null || Math.abs(desiredClosedAt.getTime() - current.getTime()) > 500));
 
-      // Try participant-level toggle; if schema lacks column, this is a no-op
-      const participantArchiveUpdated = await prisma.messageParticipant.updateMany({
-        where: { threadId: thread.id, userId: viewerId },
-        data: { archived: desired as any },
-      });
-
-      // If no rows changed (e.g., column doesn’t exist), fall back to thread-level
-      if (participantArchiveUpdated.count === 0) {
-        await prisma.messageThread.update({
+      if (isChange) {
+        await prisma.thread.update({
           where: { id: thread.id },
-          data: { archived: desired as any, updatedAt: new Date() },
+          data: { closedAt: desiredClosedAt },
         });
       }
 
@@ -299,9 +290,8 @@ export const PATCH = withAuth(async (req, ctx) => {
       });
     }
 
-    // Exhaustiveness guard
     return jsonError(400, 'unsupported_action');
-  } catch (err) {
+  } catch {
     return jsonError(500, 'thread_update_failed');
   }
 });

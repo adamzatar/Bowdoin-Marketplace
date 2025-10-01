@@ -1,10 +1,11 @@
 // packages/contracts/src/index.ts
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Named exports (kept for backward compatibility with existing imports)
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Auth
 export { AuthOkSchema } from './schemas/auth';
-
-// Users (export only unique names)
-// export { UserSchema, UserIdSchema } from './schemas/users';
 
 // Affiliation
 export {
@@ -12,23 +13,25 @@ export {
   AffiliationPolicyNoteSchema,
 } from './schemas/affiliation';
 
-// Health
-// export { HealthOkSchema } from './schemas/health';
-
-// Listings
-export {
-  ListingIdSchema,
-  // Export other listing-only schemas here,
-  // but DO NOT re-export names that also exist in ./schemas/admin
-  // e.g., if admin defines RemoveListing*, re-export those ONLY from admin.
-} from './schemas/listings';
+// Listings (keep minimal, non-conflicting named exports)
+export { ListingIdSchema } from './schemas/listings';
 
 // Messages
 export { MessageIdSchema } from './schemas/messages';
 
-// Upload
-// export { UploadInitSchema } from './schemas/upload';
+// If you later need specific Upload/Admin schemas as named exports,
+// add them here only if they won't collide with similarly named items
+// in other modules.
 
-// Admin
-// Export admin-only names that don't collide with listings
-// export { AdminOnlyThingSchema } from './schemas/admin';
+// ─────────────────────────────────────────────────────────────────────────────
+// Namespaced exports (preferred going forward to avoid name collisions)
+// Consumers can do:  import { Listings } from '@bowdoin/contracts';
+// Then use:          Listings.ListingCreateSchema, etc.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export * as Auth from './schemas/auth';
+export * as Affiliation from './schemas/affiliation';
+export * as Listings from './schemas/listings';
+export * as Messages from './schemas/messages';
+export * as Upload from './schemas/upload';
+export * as Admin from './schemas/admin';

@@ -1,40 +1,80 @@
 // packages/email/src/sendVerificationEmail.ts
-import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
-import { SESClient, SendRawEmailCommand } from "@aws-sdk/client-ses";
-import { env } from "@bowdoin/config/env";
-import { audit } from "@bowdoin/observability/audit";
-import { logger } from "@bowdoin/observability/logger";
-import { htmlToText } from "html-to-text";
-import juice from "juice";
-// NOTE: default import only; do not import named types from "mjml"
-import mjml2html from "mjml";
-import nodemailer, { type Transporter } from "nodemailer";
-
 /**
- * Email provider selection:
- *  - SES: set EMAIL_PROVIDER=ses and AWS creds/region in env
- *  - SMTP: set EMAIL_PROVIDER=smtp and SMTP_* in env
- *  - LOG (default): EMAIL_PROVIDER=log -> prints the message for local/dev
+ * Server-only email utilities.
+ * Heavy deps (mjml / juice / html-to-text / nodemailer / AWS SDK) are lazy-loaded only when needed.
  */
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const TEMPLATES_DIR = resolve(__dirname, "templates");
+const __isServer = typeof window === 'undefined';
+if (!__isServer) {
+  throw new Error('packages/email: sendVerificationEmail must only be imported on the server.');
+}
 
-type VerifyEmailPayload = {
+import { Buffer } from 'node:buffer';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { env } from '@bowdoin/config/env';
+import { audit } from '@bowdoin/observability/audit';
+import { logger } from '@bowdoin/observability/logger';
+
+// Type-only (runtime deps are lazy)
+import type { Transporter } from 'nodemailer';
+import type { SESClientConfig } from '@aws-sdk/client-ses';
+
+const INLINE_FALLBACK_MJML = `
+<mjml>
+  <mj-head>
+    <mj-title>{{APP_NAME}} – Verify your email</mj-title>
+  </mj-head>
+  <mj-body background-color="#f7f7fb">
+    <mj-section>
+      <mj-column>
+        <mj-text font-size="20px" font-weight="600">Verify your email</mj-text>
+        <mj-text>Hello {{RECIPIENT}},</mj-text>
+        <mj-text>Please confirm your email to continue{{#AFFILIATION}} ({{AFFILIATION}}){{/AFFILIATION}}.</mj-text>
+        <mj-button href="{{CTA_URL}}" background-color="#1f70ff">Verify email</mj-button>
+        <mj-text>If the button doesn't work, copy this link into your browser:</mj-text>
+        <mj-text>{{CTA_URL}}</mj-text>
+        <mj-text font-size="12px" color="#777">
+          Need help? Contact {{SUPPORT_EMAIL}}.
+        </mj-text>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>
+`.trim();
+
+async function loadCommunityTemplate(): Promise<string> {
+  const moduleUrl =
+    typeof import.meta !== 'undefined' && import.meta.url
+      ? import.meta.url
+      : typeof __filename === 'string'
+        ? `file://${__filename}`
+        : `file://${process.cwd()}/`;
+  const here = dirname(fileURLToPath(moduleUrl));
+  const compiledPath = join(here, 'templates', 'community-verify.mjml');
+
+  try {
+    return await readFile(compiledPath, 'utf8');
+  } catch (err) {
+    try {
+      const srcPath = join(here, '..', 'src', 'templates', 'community-verify.mjml');
+      return await readFile(srcPath, 'utf8');
+    } catch {
+      logger.warn({ err }, '[email] MJML template not found; using inline fallback');
+      return INLINE_FALLBACK_MJML;
+    }
+  }
+}
+
+export type VerifyEmailPayload = {
   to: string;
-  /** Signed token issued by API for email verification */
   token: string;
-  /** Where the CTA should land (e.g., https://app.example.com/auth/verify) */
   verifyBaseUrl: string;
-  /** Distinguish between Bowdoin-associated vs. community accounts for copy */
-  affiliation?: string; // e.g., 'community' | 'campus' | 'staff' | 'admin'
-  /** Optional: deep link back to last intent (listings/messages) */
+  affiliation?: string;
   redirectPath?: string;
-  /** Optional: explicit brand name to display; otherwise we infer. */
   brandName?: string;
 };
 
@@ -46,10 +86,9 @@ type RenderedEmail = {
 };
 
 function signLink(url: string): string {
-  // Lightweight integrity suffix; server should recompute & verify.
-  const secret = env.EMAIL_LINK_SIGNING_SECRET ?? "";
-  const h = createHash("sha256").update(`${url}:${secret}`).digest("hex").slice(0, 16);
-  const sep = url.includes("?") ? "&" : "?";
+  const secret = env.EMAIL_LINK_SIGNING_SECRET ?? '';
+  const h = createHash('sha256').update(`${url}:${secret}`).digest('hex').slice(0, 16);
+  const sep = url.includes('?') ? '&' : '?';
   return `${url}${sep}sig=${h}`;
 }
 
@@ -63,71 +102,104 @@ function verificationUrl(payload: VerifyEmailPayload): string {
   return signLink(raw);
 }
 
-async function renderTemplate(payload: VerifyEmailPayload): Promise<RenderedEmail> {
-  const mjmlPath = resolve(TEMPLATES_DIR, "community-verify.mjml");
-  const mjml = await readFile(mjmlPath, "utf8");
+function brandName(payload: VerifyEmailPayload): string {
+  return payload.brandName ?? env.OTEL_SERVICE_NAME ?? 'Bowdoin Marketplace';
+}
 
+/** Lightweight rendering (no MJML/uglify chain). Used for EMAIL_PROVIDER=log. */
+function renderLite(payload: VerifyEmailPayload): RenderedEmail {
+  const url = verificationUrl(payload);
+  const brand = brandName(payload);
+  const subject =
+    (payload.affiliation ?? '').toLowerCase() === 'community'
+      ? `${brand}: Verify your community email`
+      : `${brand}: Verify your email`;
+
+  const text = [
+    `Verify your email for ${brand}`,
+    '',
+    `Hello ${payload.to},`,
+    'Please click the link below to verify your email:',
+    url,
+    '',
+    'If you did not request this, you can ignore this message.',
+  ].join('\n');
+
+  const html = [
+    '<!doctype html>',
+    '<meta charset="utf-8" />',
+    `<title>${subject}</title>`,
+    `<h2 style="font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif">${subject}</h2>`,
+    `<p>Hello ${payload.to},</p>`,
+    `<p>Please click the button below to verify your email.</p>`,
+    `<p><a href="${url}" style="display:inline-block;padding:10px 16px;background:#1f70ff;color:#fff;border-radius:6px;text-decoration:none">Verify email</a></p>`,
+    `<p>If the button doesn’t work, copy this link into your browser:<br/><a href="${url}">${url}</a></p>`,
+  ].join('\n');
+
+  return { subject, html, text, messageId: randomUUID() };
+}
+
+/** Full MJML rendering (lazy heavy deps). Used only for SES/SMTP. */
+async function renderMjml(payload: VerifyEmailPayload): Promise<RenderedEmail> {
+  const [{ default: mjml }, { default: juice }, { htmlToText }] = await Promise.all([
+    import('mjml'),
+    import('juice'),
+    import('html-to-text'),
+  ]);
+
+  const mjmlSource = await loadCommunityTemplate();
   const ctaUrl = verificationUrl(payload);
+  const brand = brandName(payload);
 
-  // Pick a friendly brand name (don’t assume APP_NAME exists)
-  const brand =
-    payload.brandName ??
-    env.OTEL_SERVICE_NAME ??
-    "Bowdoin Marketplace";
+  const rendered = mjmlSource
+    .replaceAll('{{APP_NAME}}', brand)
+    .replaceAll('{{CTA_URL}}', ctaUrl)
+    .replaceAll('{{RECIPIENT}}', payload.to)
+    .replaceAll('{{AFFILIATION}}', payload.affiliation ?? '')
+    .replaceAll('{{SUPPORT_EMAIL}}', env.EMAIL_SUPPORT_ADDRESS ?? env.EMAIL_FROM);
 
-  // Very small string interpolation. If you need logic/partials, swap to React Email later.
-  const rendered = mjml
-    .replaceAll("{{APP_NAME}}", brand)
-    .replaceAll("{{CTA_URL}}", ctaUrl)
-    .replaceAll("{{RECIPIENT}}", payload.to)
-    .replaceAll("{{AFFILIATION}}", payload.affiliation ?? "")
-    .replaceAll("{{SUPPORT_EMAIL}}", env.EMAIL_SUPPORT_ADDRESS ?? env.EMAIL_FROM);
-
-  const { html: mjmlHtml, errors } = mjml2html(rendered, {
-    validationLevel: "strict",
+  const { html: mjmlHtml, errors } = mjml(rendered, {
+    validationLevel: 'strict',
     minify: true,
     keepComments: false,
   });
 
-  if (errors.length) {
-    // mjml errors contain objects; log succinctly without relying on MJML types
+  if (errors?.length) {
     logger.warn(
       {
         errors: errors.map((e: unknown) => {
           const obj = e as { line?: number; message?: string };
-          return { line: obj?.line ?? null, message: obj?.message ?? "MJML error" };
+          return { line: obj?.line ?? null, message: obj?.message ?? 'MJML error' };
         }),
       },
-      "MJML validation produced warnings/errors",
+      'MJML validation produced warnings/errors',
     );
   }
 
   const inlined = juice(mjmlHtml);
-  const txt = htmlToText(inlined, {
-    selectors: [{ selector: "a", options: { hideLinkHrefIfSameAsText: true } }],
+  const text = htmlToText(inlined, {
+    selectors: [{ selector: 'a', options: { hideLinkHrefIfSameAsText: true } }],
     wordwrap: 100,
   });
 
   const subject =
-    (payload.affiliation ?? "").toLowerCase() === "community"
+    (payload.affiliation ?? '').toLowerCase() === 'community'
       ? `${brand}: Verify your community email`
       : `${brand}: Verify your email`;
 
-  return { subject, html: inlined, text: txt, messageId: randomUUID() };
+  return { subject, html: inlined, text, messageId: randomUUID() };
 }
 
-/** Build a nodemailer transporter for SMTP. */
-function createSmtpTransport(): Transporter {
-  const provider = (env.EMAIL_PROVIDER ?? "log").toLowerCase();
-  if (provider !== "smtp") {
-    throw new Error("createSmtpTransport called but EMAIL_PROVIDER is not smtp");
+/** Build a nodemailer transporter for SMTP (lazy runtime import). */
+async function createSmtpTransport(): Promise<Transporter> {
+  const provider = (env.EMAIL_PROVIDER ?? 'log').toLowerCase();
+  if (provider !== 'smtp') {
+    throw new Error('createSmtpTransport called but EMAIL_PROVIDER is not smtp');
   }
+  const nodemailer = (await import('nodemailer')).default;
 
-  // Guard optional values; treat these as explicit booleans if present
   const secure =
-    env.SMTP_SECURE === true ||
-    env.SMTP_PORT === 465 ||
-    String(env.SMTP_PORT ?? "") === "465";
+    env.SMTP_SECURE === true || env.SMTP_PORT === 465 || String(env.SMTP_PORT ?? '') === '465';
 
   return nodemailer.createTransport({
     host: env.SMTP_HOST,
@@ -140,43 +212,41 @@ function createSmtpTransport(): Transporter {
             pass: env.SMTP_PASS,
           }
         : undefined,
-    tls:
-      env.SMTP_TLS_REJECT_UNAUTHORIZED === false
-        ? { rejectUnauthorized: false }
-        : undefined,
+    tls: env.SMTP_TLS_REJECT_UNAUTHORIZED === false ? { rejectUnauthorized: false } : undefined,
   });
 }
 
 async function sendViaSes(from: string, to: string, rendered: RenderedEmail) {
-  const client = new SESClient({
-    // Prefer dedicated AWS_REGION; fallback to S3_REGION
-    region: env.AWS_REGION ?? env.S3_REGION,
-  });
+  const { SESClient, SendRawEmailCommand } = await import('@aws-sdk/client-ses');
 
-  // Build raw MIME to preserve our HTML/text exactly and support future DKIM/headers.
+  const region: string = env.AWS_REGION ?? env.S3_REGION ?? 'us-east-1';
+  const sesConfig: SESClientConfig = { region };
+
+  const client = new SESClient(sesConfig);
+
   const boundary = `mixed-${randomUUID()}`;
   const raw = [
-    "From: " + from,
-    "To: " + to,
-    "Subject: " + rendered.subject,
-    "MIME-Version: 1.0",
+    'From: ' + from,
+    'To: ' + to,
+    'Subject: ' + rendered.subject,
+    'MIME-Version: 1.0',
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
-    "",
+    '',
     `--${boundary}`,
-    "Content-Type: text/plain; charset=utf-8",
-    "Content-Transfer-Encoding: 7bit",
-    "",
+    'Content-Type: text/plain; charset=utf-8',
+    'Content-Transfer-Encoding: 7bit',
+    '',
     rendered.text,
-    "",
+    '',
     `--${boundary}`,
-    "Content-Type: text/html; charset=utf-8",
-    "Content-Transfer-Encoding: 7bit",
-    "",
+    'Content-Type: text/html; charset=utf-8',
+    'Content-Transfer-Encoding: 7bit',
+    '',
     rendered.html,
-    "",
+    '',
     `--${boundary}--`,
-    "",
-  ].join("\r\n");
+    '',
+  ].join('\r\n');
 
   await client.send(
     new SendRawEmailCommand({
@@ -205,57 +275,62 @@ async function sendViaSmtp(
 
 /**
  * Sends an email verification message using the configured provider.
+ * (Exported API unchanged)
  */
 export async function sendVerificationEmail(
   payload: VerifyEmailPayload,
 ): Promise<{ ok: true; provider: string; messageId: string }> {
   const to = payload.to.trim().toLowerCase();
   const from = env.EMAIL_FROM;
-  const provider = (env.EMAIL_PROVIDER ?? "log").toLowerCase();
+  const provider = (env.EMAIL_PROVIDER ?? 'log').toLowerCase();
 
-  const rendered = await renderTemplate(payload);
-
-  const meta = {
+  const metaBase = {
     to,
     from,
-    messageId: rendered.messageId,
     provider,
     affiliation: payload.affiliation ?? undefined,
   } as const;
 
-  logger.info(meta, "Preparing verification email");
+  logger.info(metaBase, 'Preparing verification email');
 
   try {
+    let rendered: RenderedEmail;
+
     switch (provider) {
-      case "ses":
+      case 'ses': {
+        rendered = await renderMjml(payload);
         await sendViaSes(from, to, rendered);
         break;
-
-      case "smtp": {
-        const transporter = createSmtpTransport();
+      }
+      case 'smtp': {
+        const transporter = await createSmtpTransport();
         if (env.EMAIL_VALIDATE_TRANSPORT === true) {
           await transporter.verify();
         }
+        rendered = await renderMjml(payload);
         await sendViaSmtp(transporter, from, to, rendered);
         break;
       }
-
-      case "log":
-      default:
+      case 'log':
+      default: {
+        // No heavy imports — just log a lightweight preview
+        rendered = renderLite(payload);
         logger.info(
           {
-            ...meta,
+            ...metaBase,
+            messageId: rendered.messageId,
             subject: rendered.subject,
-            textPreview: rendered.text.slice(0, 140),
+            previewText: rendered.text.slice(0, 140),
             verifyUrl: verificationUrl(payload),
           },
-          "[DEV] Verification email (not sent)",
+          '[DEV] Verification email (not sent)',
         );
         break;
+      }
     }
 
-    await audit.emit("user.email_verification_sent", {
-      outcome: "success",
+    await audit.emit('user.email_verification_sent', {
+      outcome: 'success',
       meta: {
         email: to,
         provider,
@@ -264,20 +339,19 @@ export async function sendVerificationEmail(
       },
     });
 
-    logger.info(meta, "Verification email dispatched");
+    logger.info({ ...metaBase, messageId: rendered.messageId }, 'Verification email dispatched');
     return { ok: true, provider, messageId: rendered.messageId };
   } catch (err) {
-    logger.error({ err, ...meta }, "Failed to dispatch verification email");
+    logger.error({ err, ...metaBase }, 'Failed to dispatch verification email');
 
-    await audit.emit("user.email_verification_sent", {
-      outcome: "failure",
-      severity: "warn",
+    await audit.emit('user.email_verification_sent', {
+      outcome: 'failure',
+      severity: 'warn',
       meta: {
         email: to,
         provider,
         affiliation: payload.affiliation ?? undefined,
-        messageId: rendered.messageId,
-        reason: "send_failed",
+        reason: 'send_failed',
       },
     });
 
@@ -285,10 +359,12 @@ export async function sendVerificationEmail(
   }
 }
 
+/** Preview builder — uses the same branch logic as send (no heavy deps for LOG). */
 export async function renderVerificationEmailPreview(
   payload: VerifyEmailPayload,
 ): Promise<RenderedEmail & { to: string; from: string; url: string }> {
-  const r = await renderTemplate(payload);
+  const provider = (env.EMAIL_PROVIDER ?? 'log').toLowerCase();
+  const r = provider === 'log' ? renderLite(payload) : await renderMjml(payload);
   const url = verificationUrl(payload);
   return { ...r, to: payload.to, from: env.EMAIL_FROM, url };
 }

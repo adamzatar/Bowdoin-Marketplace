@@ -6,22 +6,18 @@
 // - Marks user as community-verified in DB
 // - Emits audit events; rate-limits attempts; no-store caching
 
-import { EmailTokenStore } from '@bowdoin/auth/utils/email-token-store';
-import { flags } from '@bowdoin/config/flags';
-import { prisma } from '@bowdoin/db'; // assumes prisma export
-import { headers } from 'next/headers';
-import { z } from 'zod';
-
-import type { NextRequest } from 'next/server';
-
-import { emitAuditEvent } from '../../../../../src/server/handlers/audit';
-import { jsonError } from '../../../../../src/server/handlers/errorHandler';
-import { rateLimit } from '../../../../../src/server/rateLimit';
-import { requireSession } from '../../../../../src/server/withAuth';
-
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
+
+import { EmailTokenStore } from '@bowdoin/auth/utils/email-token-store';
+import { flags } from '@bowdoin/config/flags';
+import { prisma } from '@bowdoin/db';
+import { Affiliation } from '@prisma/client';
+import { headers } from 'next/headers';
+import { z } from 'zod';
+
+import { withAuth, rateLimit, auditEvent, jsonError } from '@/server';
 
 function noStore() {
   return {
@@ -35,18 +31,30 @@ function noStore() {
 
 const Body = z.object({ token: z.string().min(16) }).strict();
 
-export async function POST(req: NextRequest) {
-  // AuthN
-  const auth = await requireSession();
-  if (!auth.ok) return auth.error;
-  const session = auth.session;
+type VerificationTokenPayload = {
+  userId: string;
+  email: string;
+  purpose: string;
+  issuedAt: number;
+  expiresAt: number;
+};
+
+type ConsumableEmailTokenStore = InstanceType<typeof EmailTokenStore> & {
+  consume: (token: string) => Promise<VerificationTokenPayload>;
+};
+
+export const POST = withAuth()(async (req, ctx) => {
+  const session = ctx.session;
+  const user = session?.user;
+  const userId = ctx.userId ?? user?.id;
+  if (!userId) return jsonError(401, 'unauthorized');
 
   // Rate limit confirmations per-user (burst-friendly)
   const hdrs = headers();
   const ip =
     hdrs.get('x-forwarded-for')?.split(',')[0]?.trim() || hdrs.get('x-real-ip') || '0.0.0.0';
   try {
-    await rateLimit(`users:verification:confirm:${session.user.id}`, 10, 60);
+    await rateLimit(`users:verification:confirm:${userId}`, 10, 60);
   } catch {
     return jsonError(429, 'Too many requests');
   }
@@ -65,21 +73,15 @@ export async function POST(req: NextRequest) {
   }
 
   // Validate & consume token
-  const store = new EmailTokenStore();
-  let payload: {
-    userId: string;
-    email: string;
-    purpose: string;
-    issuedAt: number;
-    expiresAt: number;
-  } | null = null;
+  const store = new EmailTokenStore() as ConsumableEmailTokenStore;
+  let payload: VerificationTokenPayload | null = null;
 
   try {
     payload = await store.consume(token!); // single-use
   } catch (err) {
     // consume throws for invalid/expired/already-used
-    emitAuditEvent('user.verification.confirm.failed', {
-      actor: { type: 'user', id: session.user.id },
+    auditEvent('user.verification.confirm.failed', {
+      actor: { type: 'user', id: userId },
       reason: err instanceof Error ? err.message : String(err),
       ip,
       ua: hdrs.get('user-agent') ?? undefined,
@@ -91,10 +93,10 @@ export async function POST(req: NextRequest) {
   if (!payload || payload.purpose !== 'community-verify') {
     return jsonError(400, 'invalid token purpose');
   }
-  if (payload.userId !== session.user.id) {
+  if (payload.userId !== userId) {
     // Don’t leak anything; also do not restore the token.
-    emitAuditEvent('user.verification.confirm.denied', {
-      actor: { type: 'user', id: session.user.id },
+    auditEvent('user.verification.confirm.denied', {
+      actor: { type: 'user', id: userId },
       attemptedFor: payload.userId,
       ip,
       ua: hdrs.get('user-agent') ?? undefined,
@@ -105,19 +107,16 @@ export async function POST(req: NextRequest) {
   // Persist verification
   try {
     await prisma.user.update({
-      where: { id: session.user.id },
+      where: { id: userId },
       data: {
-        affiliationVerified: true,
-        // Optional fields if your schema has them:
-        affiliationEmail: payload.email,
-        affiliationVerifiedAt: new Date(),
-      } as any,
-      // ^ casting to any so it won’t break if some fields aren’t present.
+        affiliation: Affiliation.COMMUNITY,
+        communityVerifiedAt: new Date(),
+      },
     });
   } catch (err) {
     // On DB failure, we do NOT re-credit the token (still single-use)
-    emitAuditEvent('user.verification.persist.failed', {
-      actor: { type: 'user', id: session.user.id },
+    auditEvent('user.verification.persist.failed', {
+      actor: { type: 'user', id: userId },
       error: err instanceof Error ? err.message : String(err),
       ip,
       ua: hdrs.get('user-agent') ?? undefined,
@@ -131,8 +130,8 @@ export async function POST(req: NextRequest) {
   }
 
   // Audit success
-  emitAuditEvent('user.verified', {
-    actor: { type: 'user', id: session.user.id },
+  auditEvent('user.verified', {
+    actor: { type: 'user', id: userId },
     email: payload.email,
     method: 'email',
     ip,
@@ -142,10 +141,10 @@ export async function POST(req: NextRequest) {
   return new Response(
     JSON.stringify({
       ok: true,
-      userId: session.user.id,
+      userId,
       email: payload.email,
       verified: true,
     }),
     { status: 200, headers: noStore() },
   );
-}
+});
