@@ -6,8 +6,6 @@ on:
     paths:
       - "infra/**"
       - ".github/workflows/infra-deploy.yml"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
   workflow_dispatch:
     inputs:
       enableCloudFront:
@@ -39,6 +37,8 @@ env:
 
 jobs:
   deploy:
+    # Prevent forks from attempting to assume your AWS role
+    if: github.repository == 'adamzatar/Bowdoin-Marketplace'
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -127,10 +127,9 @@ jobs:
       - name: Debug OIDC token claims
         run: |
           set -euo pipefail
-
           if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
             echo "::error::ACTIONS_ID_TOKEN_REQUEST_* env not available (check permissions: id-token: write)."
-            env | sort | sed -n '1,80p' || true
+            env | sort | sed -n '1,120p' || true
             exit 1
           fi
 
