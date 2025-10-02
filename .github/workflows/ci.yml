@@ -172,8 +172,27 @@ jobs:
             fi
           fi
 
-      - name: TypeScript - build mode
-        run: pnpm -w exec tsc -b
+      - name: TypeScript - per package (noEmit)
+        run: |
+          set -euo pipefail
+          # Find every package that has a tsconfig.json and run tsc there.
+          # This avoids requiring a root tsconfig.json.
+          fails=0
+          mapfile -t PKG_DIRS < <(jq -r '.[].path' <(pnpm m ls -r --json) | sed 's#//##' | sort -u)
+          for dir in "${PKG_DIRS[@]}"; do
+            if [ -f "$dir/tsconfig.json" ]; then
+              echo ""
+              echo "=== TSC >> $dir"
+              if ! pnpm --dir "$dir" exec tsc -p tsconfig.json --noEmit; then
+                echo "!! FAILED: $dir"
+                fails=$((fails+1))
+              fi
+            fi
+          done
+          if [ "$fails" -ne 0 ]; then
+            echo "::error::$fails package(s) failed typecheck"
+            exit 1
+          fi
 
       - name: Upload pnpm logs on failure
         if: failure()
