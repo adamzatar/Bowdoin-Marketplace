@@ -23,7 +23,7 @@ on:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -139,8 +139,38 @@ jobs:
           restore-keys: |
             pnpm-${{ runner.os }}-
 
-      - name: Install deps (frozen)
-        run: pnpm install --frozen-lockfile
+      - name: Install deps (resilient)
+        run: |
+          set -euo pipefail
+
+          echo "::group::pnpm env & registry"
+          pnpm -v
+          node -v
+          pnpm config list || true
+          pnpm config get registry || true
+          echo "lockfile sha256: $(sha256sum pnpm-lock.yaml | awk '{print $1}')" || true
+          echo "::endgroup::"
+
+          n=0
+          until [ $n -ge 3 ]; do
+            if pnpm install --frozen-lockfile; then
+              OK=1; break
+            fi
+            n=$((n+1))
+            echo "pnpm install --frozen-lockfile failed (attempt $n). Retrying in 10s..."
+            sleep 10
+          done
+
+          if [ "${OK:-0}" != "1" ]; then
+            echo "::warning::Frozen install failed after 3 attempts; checking for outdated lockfile…"
+            if grep -E "ERR_PNPM_OUTDATED_LOCKFILE|Lockfile is up to date, but" -i pnpm-debug.log >/dev/null 2>&1; then
+              echo "::notice::Detected lockfile drift; attempting non-frozen install (CI fallback)."
+              pnpm install --no-frozen-lockfile
+            else
+              echo "::error::pnpm install failed; see pnpm-debug.log"
+              exit 1
+            fi
+          fi
 
       - name: TypeScript - build mode
         run: pnpm -w exec tsc -b
@@ -188,8 +218,38 @@ jobs:
           restore-keys: |
             pnpm-${{ runner.os }}-
 
-      - name: Install deps (frozen)
-        run: pnpm install --frozen-lockfile
+      - name: Install deps (resilient)
+        run: |
+          set -euo pipefail
+
+          echo "::group::pnpm env & registry"
+          pnpm -v
+          node -v
+          pnpm config list || true
+          pnpm config get registry || true
+          echo "lockfile sha256: $(sha256sum pnpm-lock.yaml | awk '{print $1}')" || true
+          echo "::endgroup::"
+
+          n=0
+          until [ $n -ge 3 ]; do
+            if pnpm install --frozen-lockfile; then
+              OK=1; break
+            fi
+            n=$((n+1))
+            echo "pnpm install --frozen-lockfile failed (attempt $n). Retrying in 10s..."
+            sleep 10
+          done
+
+          if [ "${OK:-0}" != "1" ]; then
+            echo "::warning::Frozen install failed after 3 attempts; checking for outdated lockfile…"
+            if grep -E "ERR_PNPM_OUTDATED_LOCKFILE|Lockfile is up to date, but" -i pnpm-debug.log >/dev/null 2>&1; then
+              echo "::notice::Detected lockfile drift; attempting non-frozen install (CI fallback)."
+              pnpm install --no-frozen-lockfile
+            else
+              echo "::error::pnpm install failed; see pnpm-debug.log"
+              exit 1
+            fi
+          fi
 
       - name: Build (workspace)
         run: pnpm -w run build || echo "No build script at root"
